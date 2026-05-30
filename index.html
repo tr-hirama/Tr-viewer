@@ -715,18 +715,21 @@ function drawTrc() {
     }
   }
 
-  // 点とラベル
+  // 点とラベル (cad-trcad と同じく X 印で描画: ±3px の対角線2本)
   ctx.font = "12px 'MS Gothic', monospace";
+  const PT = 3;
   for (const p of trc.points) {
     if (p.notDisp) continue;
     const sx = tx(p.x), sy = ty(p.y);
-    ctx.fillStyle = "#ff5c5c";
+    ctx.strokeStyle = "#ff5c5c";
+    ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.arc(sx, sy, 3.2, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.moveTo(sx - PT, sy - PT); ctx.lineTo(sx + PT, sy + PT);
+    ctx.moveTo(sx - PT, sy + PT); ctx.lineTo(sx + PT, sy - PT);
+    ctx.stroke();
     if (chkLabel.checked && p.name) {
       ctx.fillStyle = "#e7e7e7";
-      ctx.fillText(p.name, sx + 6, sy - 6);
+      ctx.fillText(p.name, sx + 2, sy - 12);
     }
   }
 }
