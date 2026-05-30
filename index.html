@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DXF ビューワー</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; font-family: "Segoe UI", "Meiryo", sans-serif; }
+  body { display: flex; flex-direction: column; background: #1e1e1e; color: #ddd; }
+
+  header {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 8px 16px;
+    background: #2d2d30;
+    border-bottom: 1px solid #3f3f46;
+  }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  #info { font-size: 12px; color: #9a9a9a; margin-left: auto; }
+  #fileLabel {
+    font-size: 12px;
+    background: #0e639c;
+    color: #fff;
+    padding: 4px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  #fileLabel:hover { background: #1177bb; }
+
+  #stage { position: relative; flex: 1 1 auto; overflow: hidden; }
+  canvas { display: block; width: 100%; height: 100%; background: #111; }
+
+  #drop {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 12px;
+    pointer-events: none;
+    color: #888;
+    transition: background 0.15s, color 0.15s;
+  }
+  #drop.empty { pointer-events: auto; }
+  #drop.over {
+    background: rgba(14, 99, 156, 0.25);
+    color: #cfe8ff;
+    border: 2px dashed #1177bb;
+  }
+  #drop .big { font-size: 22px; }
+  #drop .small { font-size: 13px; }
+  #drop.hidden { display: none; }
+
+  #hud {
+    position: absolute; left: 12px; bottom: 10px;
+    font-size: 11px; color: #888;
+    background: rgba(0,0,0,0.4);
+    padding: 4px 8px; border-radius: 4px;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+  <header>
+    <h1>DXF ビューワー</h1>
+    <label id="fileLabel">ファイルを開く
+      <input id="fileInput" type="file" accept=".dxf" hidden>
+    </label>
+    <span id="info"></span>
+  </header>
+
+  <div id="stage">
+    <canvas id="canvas"></canvas>
+    <div id="drop" class="empty">
+      <div class="big">📐 DXF ファイルをここにドロップ</div>
+      <div class="small">またはヘッダーの「ファイルを開く」から選択</div>
+    </div>
+    <div id="hud">ホイール: 拡大縮小 / ドラッグ: 移動 / ダブルクリック: 全体表示</div>
+  </div>
+
+<script>
+"use strict";
+
+// ---------------------------------------------------------------------------
+// DXF パーサ (ASCII DXF の group-code / value ペアを読み、基本エンティティを抽出)
+// ---------------------------------------------------------------------------
+function parseDxf(text) {
+  // CRLF / CR / LF いずれにも対応
+  const lines = text.split(/\r\n|\r|\n/);
+  const pairs = [];
+  for (let i = 0; i + 1 < lines.length; i += 2) {
+    const code = parseInt(lines[i].trim(), 10);
+    if (Number.isNaN(code)) continue;
+    pairs.push([code, lines[i + 1]]);
+  }
+
+  const entities = [];
+  let i = 0;
+  const n = pairs.length;
+
+  // ENTITIES セクションまで進む
+  while (i < n) {
+    const [code, val] = pairs[i];
+    if (code === 0 && val.trim() === "SECTION") {
+      // 次の (2, name) を確認
+      if (i + 1 < n && pairs[i + 1][0] === 2 && pairs[i + 1][1].trim() === "ENTITIES") {
+        i += 2;
+        break;
+      }
+    }
+    i++;
+  }
+
+  // ENTITIES セクション内を走査
+  function readEntity(startType) {
+    const e = { type: startType, props: {}, vertices: [] };
+    let pendingX = null;
+    while (i < n) {
+      const [code, raw] = pairs[i];
+      if (code === 0) break; // 次のエンティティ
+      const val = raw.trim();
+      // LWPOLYLINE の頂点 (10/20 が繰り返す)
+      if (code === 10) {
+        pendingX = parseFloat(val);
+        if (startType !== "LINE" && startType !== "CIRCLE" && startType !== "ARC" &&
+            startType !== "TEXT" && startType !== "MTEXT" && startType !== "POINT") {
+          // ポリライン系は頂点として蓄積
+        }
+        e.props.x = parseFloat(val);
+      } else if (code === 20) {
+        e.props.y = parseFloat(val);
+        if (pendingX !== null && (startType === "LWPOLYLINE")) {
+          e.vertices.push({ x: pendingX, y: parseFloat(val) });
+          pendingX = null;
+        }
+      } else if (code === 11) { e.props.x2 = parseFloat(val); }
+      else if (code === 21) { e.props.y2 = parseFloat(val); }
+      else if (code === 40) { e.props.r = parseFloat(val); e.props.height = parseFloat(val); }
+      else if (code === 50) { e.props.startAngle = parseFloat(val); }
+      else if (code === 51) { e.props.endAngle = parseFloat(val); }
+      else if (code === 70) { e.props.flags = parseInt(val, 10); }
+      else if (code === 1)  { e.props.text = raw; }
+      else if (code === 8)  { e.props.layer = val; }
+      i++;
+    }
+    return e;
+  }
+
+  // POLYLINE (旧形式: VERTEX が続き SEQEND で終わる)
+  function readPolyline() {
+    const e = { type: "POLYLINE", props: {}, vertices: [] };
+    // POLYLINE 自身のプロパティを飛ばす
+    while (i < n && pairs[i][0] !== 0) {
+      const [code, raw] = pairs[i];
+      if (code === 70) e.props.flags = parseInt(raw.trim(), 10);
+      if (code === 8) e.props.layer = raw.trim();
+      i++;
+    }
+    // VERTEX を読む
+    while (i < n) {
+      const [code, val] = pairs[i];
+      if (code === 0) {
+        const t = val.trim();
+        if (t === "VERTEX") {
+          i++;
+          let vx = 0, vy = 0;
+          while (i < n && pairs[i][0] !== 0) {
+            const [c, r] = pairs[i];
+            if (c === 10) vx = parseFloat(r.trim());
+            else if (c === 20) vy = parseFloat(r.trim());
+            i++;
+          }
+          e.vertices.push({ x: vx, y: vy });
+        } else if (t === "SEQEND") {
+          // SEQEND のプロパティを飛ばす
+          i++;
+          while (i < n && pairs[i][0] !== 0) i++;
+          break;
+        } else {
+          break;
+        }
+      } else {
+        i++;
+      }
+    }
+    return e;
+  }
+
+  while (i < n) {
+    const [code, raw] = pairs[i];
+    const val = raw.trim();
+    if (code === 0) {
+      if (val === "ENDSEC") break;
+      const type = val;
+      i++;
+      if (type === "POLYLINE") {
+        entities.push(readPolyline());
+      } else if (["LINE", "LWPOLYLINE", "CIRCLE", "ARC", "POINT", "TEXT", "MTEXT"].includes(type)) {
+        entities.push(readEntity(type));
+      } else {
+        // 未対応エンティティはプロパティを読み飛ばす
+        while (i < n && pairs[i][0] !== 0) i++;
+      }
+    } else {
+      i++;
+    }
+  }
+
+  return entities;
+}
+
+// ---------------------------------------------------------------------------
+// 描画
+// ---------------------------------------------------------------------------
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+const info = document.getElementById("info");
+const dropEl = document.getElementById("drop");
+
+let entities = [];
+let view = { scale: 1, ox: 0, oy: 0 }; // ox/oy: モデル座標の平行移動量(px), y は上向き
+
+function resizeCanvas() {
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = Math.round(rect.width * dpr);
+  canvas.height = Math.round(rect.height * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function computeBounds(ents) {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  const ext = (x, y) => {
+    if (x < minX) minX = x; if (y < minY) minY = y;
+    if (x > maxX) maxX = x; if (y > maxY) maxY = y;
+  };
+  for (const e of ents) {
+    switch (e.type) {
+      case "LINE":
+        ext(e.props.x, e.props.y); ext(e.props.x2, e.props.y2); break;
+      case "CIRCLE":
+        ext(e.props.x - e.props.r, e.props.y - e.props.r);
+        ext(e.props.x + e.props.r, e.props.y + e.props.r); break;
+      case "ARC": {
+        // 簡易: バウンディングは円で近似
+        ext(e.props.x - e.props.r, e.props.y - e.props.r);
+        ext(e.props.x + e.props.r, e.props.y + e.props.r); break;
+      }
+      case "POINT":
+      case "TEXT":
+      case "MTEXT":
+        ext(e.props.x, e.props.y); break;
+      case "LWPOLYLINE":
+      case "POLYLINE":
+        for (const v of e.vertices) ext(v.x, v.y); break;
+    }
+  }
+  if (!isFinite(minX)) return null;
+  return { minX, minY, maxX, maxY };
+}
+
+function fitView() {
+  const b = computeBounds(entities);
+  const rect = canvas.getBoundingClientRect();
+  if (!b) { view = { scale: 1, ox: rect.width / 2, oy: rect.height / 2 }; return; }
+  const w = b.maxX - b.minX || 1;
+  const h = b.maxY - b.minY || 1;
+  const pad = 40;
+  const scale = Math.min((rect.width - pad * 2) / w, (rect.height - pad * 2) / h);
+  view.scale = scale;
+  const cx = (b.minX + b.maxX) / 2;
+  const cy = (b.minY + b.maxY) / 2;
+  // モデル中心が画面中心に来るように
+  view.ox = rect.width / 2 - cx * scale;
+  view.oy = rect.height / 2 + cy * scale; // y 反転
+}
+
+// モデル座標 -> 画面座標
+function tx(x) { return x * view.scale + view.ox; }
+function ty(y) { return -y * view.scale + view.oy; }
+
+function draw() {
+  const rect = canvas.getBoundingClientRect();
+  ctx.clearRect(0, 0, rect.width, rect.height);
+
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = "#d7e3ff";
+  ctx.fillStyle = "#d7e3ff";
+
+  for (const e of entities) {
+    ctx.beginPath();
+    switch (e.type) {
+      case "LINE":
+        ctx.moveTo(tx(e.props.x), ty(e.props.y));
+        ctx.lineTo(tx(e.props.x2), ty(e.props.y2));
+        ctx.stroke();
+        break;
+      case "CIRCLE":
+        ctx.arc(tx(e.props.x), ty(e.props.y), e.props.r * view.scale, 0, Math.PI * 2);
+        ctx.stroke();
+        break;
+      case "ARC": {
+        // DXF の角度は反時計回り・度。画面は y 反転のため start/end を入れ替え符号反転
+        const a0 = -e.props.endAngle * Math.PI / 180;
+        const a1 = -e.props.startAngle * Math.PI / 180;
+        ctx.arc(tx(e.props.x), ty(e.props.y), e.props.r * view.scale, a0, a1);
+        ctx.stroke();
+        break;
+      }
+      case "LWPOLYLINE":
+      case "POLYLINE": {
+        if (e.vertices.length) {
+          ctx.moveTo(tx(e.vertices[0].x), ty(e.vertices[0].y));
+          for (let k = 1; k < e.vertices.length; k++)
+            ctx.lineTo(tx(e.vertices[k].x), ty(e.vertices[k].y));
+          // 閉じフラグ (70 の bit1)
+          if (e.props.flags & 1) ctx.closePath();
+          ctx.stroke();
+        }
+        break;
+      }
+      case "POINT":
+        ctx.arc(tx(e.props.x), ty(e.props.y), 2, 0, Math.PI * 2);
+        ctx.fill();
+        break;
+      case "TEXT":
+      case "MTEXT": {
+        if (e.props.text != null) {
+          const size = Math.max(8, (e.props.height || 1) * view.scale);
+          ctx.save();
+          ctx.font = size + "px sans-serif";
+          ctx.fillText(e.props.text, tx(e.props.x), ty(e.props.y));
+          ctx.restore();
+        }
+        break;
+      }
+    }
+  }
+}
+
+function render() { resizeCanvas(); draw(); }
+
+// ---------------------------------------------------------------------------
+// ファイル読み込み
+// ---------------------------------------------------------------------------
+function loadText(text, name) {
+  try {
+    entities = parseDxf(text);
+  } catch (err) {
+    alert("DXF の解析に失敗しました: " + err.message);
+    return;
+  }
+  dropEl.classList.add("hidden");
+  dropEl.classList.remove("empty");
+  fitView();
+  draw();
+  info.textContent = `${name} — ${entities.length} エンティティ`;
+}
+
+function handleFile(file) {
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => loadText(reader.result, file.name);
+  reader.onerror = () => alert("ファイルの読み込みに失敗しました");
+  reader.readAsText(file);
+}
+
+document.getElementById("fileInput").addEventListener("change", (e) => {
+  handleFile(e.target.files[0]);
+});
+
+// ドラッグ&ドロップ
+const stage = document.getElementById("stage");
+["dragenter", "dragover"].forEach(ev =>
+  stage.addEventListener(ev, (e) => {
+    e.preventDefault(); e.stopPropagation();
+    dropEl.classList.remove("hidden");
+    dropEl.classList.add("over");
+  })
+);
+["dragleave", "drop"].forEach(ev =>
+  stage.addEventListener(ev, (e) => {
+    e.preventDefault(); e.stopPropagation();
+    dropEl.classList.remove("over");
+    if (entities.length) dropEl.classList.add("hidden");
+  })
+);
+stage.addEventListener("drop", (e) => {
+  const f = e.dataTransfer.files[0];
+  if (f) handleFile(f);
+});
+
+// ---------------------------------------------------------------------------
+// ズーム / パン
+// ---------------------------------------------------------------------------
+canvas.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  if (!entities.length) return;
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+  const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+  // マウス位置を基準にズーム
+  view.ox = mx - (mx - view.ox) * factor;
+  view.oy = my - (my - view.oy) * factor;
+  view.scale *= factor;
+  draw();
+}, { passive: false });
+
+let dragging = false, lastX = 0, lastY = 0;
+canvas.addEventListener("mousedown", (e) => {
+  dragging = true; lastX = e.clientX; lastY = e.clientY;
+});
+window.addEventListener("mousemove", (e) => {
+  if (!dragging) return;
+  view.ox += e.clientX - lastX;
+  view.oy += e.clientY - lastY;
+  lastX = e.clientX; lastY = e.clientY;
+  draw();
+});
+window.addEventListener("mouseup", () => { dragging = false; });
+canvas.addEventListener("dblclick", () => { if (entities.length) { fitView(); draw(); } });
+
+window.addEventListener("resize", render);
+resizeCanvas();
+</script>
+</body>
+</html>
