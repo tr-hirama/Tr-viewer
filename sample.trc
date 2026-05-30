@@ -1,8 +1,47 @@
-' TRC サンプル (測量座標点)  点名,X(横/東),Y(縦/北),Z,コード
-T1,100.000,200.000,12.5,基準点
-T2,150.000,210.000,12.8,境界
-T3,180.000,260.000,13.1,境界
-T4,160.000,310.000,13.0,境界
-T5,110.000,300.000,12.7,境界
-T6,90.000,250.000,12.6,境界
-K1,130.000,250.000,12.9,構造物
+*Overview-Section*
+ "" , "" , "" , "Tr-CAD Ver0.0.7.0" , "2026/05/30" , "" , "サンプル" , "" ,  , 
+ , SAMPLE-PC , 2026/05/30 12:00:00
+*Section-End*
+*SurveyData-Section*
+*Section-End*
+*Point-Section*
+ S0 , 0 , 0 , 1 , 0 , 0 , 0
+ T1 , 100 , 100 , 0 , 0 , 0 , 0
+ T2 , 150 , 110 , 0 , 0 , 0 , 0
+ T3 , 160 , 160 , 0 , 0 , 0 , 0
+ T4 , 110 , 150 , 0 , 0 , 0 , 0
+ P1 , 130 , 130 , 0 , 0 , 0 , 0
+*Section-End*
+*Line-Section*
+ L1 , K , T1 , T2 , 0 , 0 , 1 , , 0
+ L2 , K , T2 , T3 , 0 , 0 , 1 , , 0
+ L3 , K , T3 , T4 , 0 , 0 , 1 , , 0
+ L4 , K , T4 , T1 , 0 , 0 , 1 , , 0
+*Section-End*
+*Circle-Section*
+ C1 , F , 130 , 130 , 8 , 0 , 0 , 0 , , 0 , 130 , 130
+*Section-End*
+*Moji-Section*
+ M1 , F , "サンプル区画" , 135 , 132 , 200 , 0 , 0 , 0
+*Section-End*
+*Hedge-Section*
+ H1 , 100 , 100 , 160 , 160 , 0
+*Section-End*
+*Pline-Section*
+ PL1 , 0 , 0
+  *PlinePoint-Section*
+   105 , 105
+   145 , 108
+   140 , 145
+  *PlinePoint-End*
+*Section-End*
+*Block-Section*
+*Section-End*
+*Insert-Section*
+*Section-End*
+*Photo-Section*
+*Section-End*
+*Level-Section*
+*Section-End*
+*Mawariken-Section*
+*Section-End*

@@ -18,11 +18,11 @@
     background: #2d2d30;
     border-bottom: 1px solid #3f3f46;
   }
-  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
-  #controls { display: flex; align-items: center; gap: 14px; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; white-space: nowrap; }
+  #controls { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
   #controls.hidden { display: none; }
   #controls label { font-size: 12px; color: #cfcfcf; display: flex; align-items: center; gap: 4px; cursor: pointer; }
-  #info { font-size: 12px; color: #9a9a9a; margin-left: auto; }
+  #info { font-size: 12px; color: #9a9a9a; margin-left: auto; white-space: nowrap; }
   #fileLabel {
     font-size: 12px;
     background: #0e639c;
@@ -30,6 +30,7 @@
     padding: 4px 12px;
     border-radius: 4px;
     cursor: pointer;
+    white-space: nowrap;
   }
   #fileLabel:hover { background: #1177bb; }
 
@@ -78,9 +79,10 @@
       <input id="fileInput" type="file" accept=".dxf,.trc" hidden>
     </label>
     <div id="controls" class="hidden">
-      <label><input type="checkbox" id="chkConnect"> 結線</label>
-      <label><input type="checkbox" id="chkCode"> コード表示</label>
-      <label><input type="checkbox" id="chkLabel" checked> 点名表示</label>
+      <label><input type="checkbox" id="chkLine" checked> 線</label>
+      <label><input type="checkbox" id="chkLabel" checked> 点名</label>
+      <label><input type="checkbox" id="chkMoji" checked> 文字</label>
+      <label><input type="checkbox" id="chkFrame" checked> 図枠</label>
     </div>
     <span id="info"></span>
   </header>
@@ -213,40 +215,156 @@ function parseDxf(text) {
 }
 
 // ===========================================================================
-// TRC パーサ (測量座標点ファイル)
-//   1 行 = 点名, X(横/東), Y(縦/北), [Z 標高], [コード]
-//   区切り: カンマ / タブ / 空白    コメント行: ' または # 始まり
+// TRC パーサ (Tr-CAD / vbSurvey 形式)
+//   実体は ZIP (先頭 "PK\x03\x04") で、内部に Shift-JIS の TrDATA.trc を持つ。
+//   平文テキストの場合もあるため両対応。
+//   TrDATA.trc は *XXX-Section* ... *Section-End* のセクション構造。
 // ===========================================================================
-function parseTrc(text) {
-  const points = [];
-  const lines = text.split(/\r\n|\r|\n/);
-  for (const raw of lines) {
-    const line = raw.trim();
-    if (line === "") continue;
-    if (line.startsWith("'") || line.startsWith("#")) continue;
-    const parts = line.split(/[,\t ]+/).filter(s => s !== "");
-    if (parts.length < 3) continue;
-    const x = parseFloat(parts[1]);
-    const y = parseFloat(parts[2]);
-    if (!isFinite(x) || !isFinite(y)) continue;   // ヘッダ行などをスキップ
-    const p = { name: parts[0], x, y };
-    if (parts.length >= 4) { const z = parseFloat(parts[3]); if (isFinite(z)) p.z = z; }
-    if (parts.length >= 5) p.code = parts.slice(4).join(" ");
-    points.push(p);
-  }
-  return points;
+
+// raw deflate を展開 (ブラウザ標準 DecompressionStream を使用、外部ライブラリ不要)
+async function inflateRaw(u8) {
+  const ds = new DecompressionStream("deflate-raw");
+  const stream = new Response(u8).body.pipeThrough(ds);
+  const ab = await new Response(stream).arrayBuffer();
+  return new Uint8Array(ab);
 }
 
-// Shift-JIS 優先でテキストをデコード (TRC は SJIS が一般的、UTF-8 もフォールバック対応)
-function decodeText(buffer, preferSjis) {
-  const tryDecode = (label) => {
-    try { return new TextDecoder(label, { fatal: false }).decode(buffer); }
-    catch (e) { return null; }
-  };
-  if (preferSjis) {
-    return tryDecode("shift_jis") || tryDecode("utf-8") || "";
+// ZIP セントラルディレクトリから TrDATA.trc を取り出す
+function extractZipEntry(buf, wantName) {
+  const dv = new DataView(buf);
+  const u8 = new Uint8Array(buf);
+  // EOCD (End Of Central Directory): 0x06054b50 を末尾から探索
+  let eocd = -1;
+  for (let i = buf.byteLength - 22; i >= 0; i--) {
+    if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
   }
-  return tryDecode("utf-8") || tryDecode("shift_jis") || "";
+  if (eocd < 0) throw new Error("ZIP の終端レコードが見つかりません");
+  const cdCount = dv.getUint16(eocd + 10, true);
+  let p = dv.getUint32(eocd + 16, true);
+  const asc = new TextDecoder("ascii");
+  for (let k = 0; k < cdCount; k++) {
+    if (dv.getUint32(p, true) !== 0x02014b50) break;
+    const method   = dv.getUint16(p + 10, true);
+    const compSize = dv.getUint32(p + 20, true);
+    const nameLen  = dv.getUint16(p + 28, true);
+    const extraLen = dv.getUint16(p + 30, true);
+    const cmtLen   = dv.getUint16(p + 32, true);
+    const lhOff    = dv.getUint32(p + 42, true);
+    const name = asc.decode(u8.subarray(p + 46, p + 46 + nameLen));
+    if (name === wantName || name.endsWith("/" + wantName)) {
+      const lNameLen  = dv.getUint16(lhOff + 26, true);
+      const lExtraLen = dv.getUint16(lhOff + 28, true);
+      const start = lhOff + 30 + lNameLen + lExtraLen;
+      return { method, data: u8.subarray(start, start + compSize) };
+    }
+    p += 46 + nameLen + extraLen + cmtLen;
+  }
+  throw new Error(wantName + " が ZIP 内に見つかりません");
+}
+
+function decodeSjis(u8) {
+  try { return new TextDecoder("shift_jis", { fatal: false }).decode(u8); }
+  catch (e) { return new TextDecoder("utf-8", { fatal: false }).decode(u8); }
+}
+
+// ArrayBuffer -> TrDATA テキスト (ZIP / 平文の両対応)
+async function readTrcText(buf) {
+  const u8 = new Uint8Array(buf);
+  if (u8.length >= 4 && u8[0] === 0x50 && u8[1] === 0x4B && u8[2] === 0x03 && u8[3] === 0x04) {
+    const { method, data } = extractZipEntry(buf, "TrDATA.trc");
+    let bytes;
+    if (method === 0) bytes = data;              // 無圧縮
+    else if (method === 8) bytes = await inflateRaw(data); // deflate
+    else throw new Error("未対応の ZIP 圧縮方式: " + method);
+    return decodeSjis(bytes);
+  }
+  return decodeSjis(u8);
+}
+
+// 1 行を CSV 分解 (ダブルクォート対応・各フィールド trim)
+function splitCsv(line) {
+  const out = [];
+  let cur = "", inQ = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (inQ) {
+      if (c === '"') {
+        if (line[i + 1] === '"') { cur += '"'; i++; }
+        else inQ = false;
+      } else cur += c;
+    } else {
+      if (c === '"') inQ = true;
+      else if (c === ",") { out.push(cur.trim()); cur = ""; }
+      else cur += c;
+    }
+  }
+  out.push(cur.trim());
+  return out;
+}
+
+const num = (v) => { const f = parseFloat(v); return isFinite(f) ? f : 0; };
+
+function parseTrc(text) {
+  const trc = {
+    points: [], lines: [], circles: [], mojis: [],
+    hedges: [], plines: [], blocks: new Map(), inserts: []
+  };
+  let section = null;
+  let inBlockPts = false, inPlinePts = false;
+  let curBlock = null, curPline = null;
+
+  for (const raw of text.split(/\r\n|\r|\n/)) {
+    const line = raw.trim();
+    if (line === "") continue;
+
+    // セクション制御
+    if (line[0] === "*" && (line.endsWith("-Section*") || line.endsWith("-End*"))) {
+      if (line === "*BlockPoint-Section*") inBlockPts = true;
+      else if (line === "*BlockPoint-End*") inBlockPts = false;
+      else if (line === "*PlinePoint-Section*") inPlinePts = true;
+      else if (line === "*PlinePoint-End*") inPlinePts = false;
+      else if (line === "*Section-End*") { section = null; curBlock = null; curPline = null; }
+      else section = line; // 例: *Point-Section*
+      continue;
+    }
+
+    const f = splitCsv(line);
+    switch (section) {
+      case "*Point-Section*":
+        trc.points.push({ name: f[0], x: num(f[1]), y: num(f[2]), notDisp: parseInt(f[3], 10) || 0 });
+        break;
+      case "*Line-Section*":
+        trc.lines.push({ name: f[0], layer: f[1], pnA: f[2], pnB: f[3],
+                         del: parseInt(f[4], 10) || 0, style: parseInt(f[6], 10) || 1 });
+        break;
+      case "*Circle-Section*":
+        trc.circles.push({ name: f[0], layer: f[1], x: num(f[2]), y: num(f[3]),
+                           r: num(f[4]), del: parseInt(f[6], 10) || 0 });
+        break;
+      case "*Moji-Section*":
+        trc.mojis.push({ name: f[0], layer: f[1], text: f[2], x: num(f[3]), y: num(f[4]),
+                         del: parseInt(f[6], 10) || 0, angle: num(f[8]) });
+        break;
+      case "*Hedge-Section*":
+        trc.hedges.push({ name: f[0], x1: num(f[1]), y1: num(f[2]), x2: num(f[3]), y2: num(f[4]) });
+        break;
+      case "*Insert-Section*":
+        trc.inserts.push({ name: f[0], layer: f[1], block: f[2], x: num(f[3]), y: num(f[4]), angle: num(f[5]) });
+        break;
+      case "*Pline-Section*":
+        if (inPlinePts) { if (curPline) curPline.pts.push({ x: num(f[0]), y: num(f[1]) }); }
+        else { curPline = { name: f[0], pts: [] }; trc.plines.push(curPline); }
+        break;
+      case "*Block-Section*":
+        if (inBlockPts) { if (curBlock) curBlock.pts.push({ x: num(f[0]), y: num(f[1]) }); }
+        else { curBlock = { name: f[0], pts: [] }; trc.blocks.set(f[0], curBlock); }
+        break;
+    }
+  }
+
+  // 点名 -> 点 のマップ (線の pnA/pnB 参照用)
+  trc.pointMap = new Map(trc.points.map(p => [p.name, p]));
+  return trc;
 }
 
 // ===========================================================================
@@ -258,13 +376,14 @@ const info = document.getElementById("info");
 const dropEl = document.getElementById("drop");
 const controls = document.getElementById("controls");
 const coordEl = document.getElementById("coord");
-const chkConnect = document.getElementById("chkConnect");
-const chkCode = document.getElementById("chkCode");
+const chkLine = document.getElementById("chkLine");
 const chkLabel = document.getElementById("chkLabel");
+const chkMoji = document.getElementById("chkMoji");
+const chkFrame = document.getElementById("chkFrame");
 
 let mode = null;          // "dxf" | "trc"
 let entities = [];        // DXF
-let points = [];          // TRC
+let trc = null;           // TRC
 let view = { scale: 1, ox: 0, oy: 0 };
 let hasData = false;
 
@@ -282,11 +401,20 @@ function resizeCanvas() {
 function computeBounds() {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   const ext = (x, y) => {
+    if (!isFinite(x) || !isFinite(y)) return;
     if (x < minX) minX = x; if (y < minY) minY = y;
     if (x > maxX) maxX = x; if (y > maxY) maxY = y;
   };
   if (mode === "trc") {
-    for (const p of points) ext(p.x, p.y);
+    for (const p of trc.points) ext(p.x, p.y);
+    for (const c of trc.circles) { ext(c.x - c.r, c.y - c.r); ext(c.x + c.r, c.y + c.r); }
+    for (const m of trc.mojis) ext(m.x, m.y);
+    for (const h of trc.hedges) { ext(h.x1, h.y1); ext(h.x2, h.y2); }
+    for (const pl of trc.plines) for (const v of pl.pts) ext(v.x, v.y);
+    for (const ins of trc.inserts) {
+      const blk = trc.blocks.get(ins.block);
+      if (blk) for (const v of blk.pts) ext(v.x + ins.x, v.y + ins.y);
+    }
   } else if (mode === "dxf") {
     for (const e of entities) {
       switch (e.type) {
@@ -318,17 +446,16 @@ function fitView() {
   const h = b.maxY - b.minY || 1;
   const pad = 50;
   const scale = Math.min((rect.width - pad * 2) / w, (rect.height - pad * 2) / h);
-  view.scale = scale;
+  view.scale = isFinite(scale) && scale > 0 ? scale : 1;
   const cx = (b.minX + b.maxX) / 2;
   const cy = (b.minY + b.maxY) / 2;
-  view.ox = rect.width / 2 - cx * scale;
-  view.oy = rect.height / 2 + cy * scale; // y 反転
+  view.ox = rect.width / 2 - cx * view.scale;
+  view.oy = rect.height / 2 + cy * view.scale; // y 反転
 }
 
-// モデル座標 -> 画面座標
+// モデル座標 (X=東/右, Y=北/上) -> 画面座標
 function tx(x) { return x * view.scale + view.ox; }
 function ty(y) { return -y * view.scale + view.oy; }
-// 画面座標 -> モデル座標
 function mxFromScreen(sx) { return (sx - view.ox) / view.scale; }
 function myFromScreen(sy) { return -(sy - view.oy) / view.scale; }
 
@@ -397,32 +524,95 @@ function drawDxf() {
 }
 
 function drawTrc() {
-  // 結線（入力順に結ぶ）
-  if (chkConnect.checked && points.length >= 2) {
-    ctx.strokeStyle = "#5b8dd9";
-    ctx.lineWidth = 1.2;
+  // 図枠 (Block を Insert 位置に配置)
+  if (chkFrame.checked) {
+    ctx.strokeStyle = "#6b6b6b";
+    ctx.lineWidth = 1;
+    for (const ins of trc.inserts) {
+      const blk = trc.blocks.get(ins.block);
+      if (!blk || blk.pts.length < 2) continue;
+      ctx.beginPath();
+      ctx.moveTo(tx(blk.pts[0].x + ins.x), ty(blk.pts[0].y + ins.y));
+      for (let k = 1; k < blk.pts.length; k++)
+        ctx.lineTo(tx(blk.pts[k].x + ins.x), ty(blk.pts[k].y + ins.y));
+      ctx.stroke();
+    }
+  }
+
+  // 生垣ライン
+  ctx.strokeStyle = "#4caf7d";
+  ctx.lineWidth = 1.2;
+  for (const h of trc.hedges) {
     ctx.beginPath();
-    ctx.moveTo(tx(points[0].x), ty(points[0].y));
-    for (let k = 1; k < points.length; k++) ctx.lineTo(tx(points[k].x), ty(points[k].y));
+    ctx.moveTo(tx(h.x1), ty(h.y1));
+    ctx.lineTo(tx(h.x2), ty(h.y2));
     ctx.stroke();
+  }
+
+  // ポリライン
+  ctx.strokeStyle = "#c9a14a";
+  ctx.lineWidth = 1.2;
+  for (const pl of trc.plines) {
+    if (pl.pts.length < 2) continue;
+    ctx.beginPath();
+    ctx.moveTo(tx(pl.pts[0].x), ty(pl.pts[0].y));
+    for (let k = 1; k < pl.pts.length; k++) ctx.lineTo(tx(pl.pts[k].x), ty(pl.pts[k].y));
+    ctx.stroke();
+  }
+
+  // 線 (点番号 pnA/pnB を参照)
+  if (chkLine.checked) {
+    ctx.lineWidth = 1.3;
+    for (const ln of trc.lines) {
+      if (ln.del) continue;
+      const a = trc.pointMap.get(ln.pnA), b = trc.pointMap.get(ln.pnB);
+      if (!a || !b) continue;
+      ctx.strokeStyle = "#5b8dd9";
+      ctx.setLineDash(ln.style === 2 ? [6, 4] : []);
+      ctx.beginPath();
+      ctx.moveTo(tx(a.x), ty(a.y));
+      ctx.lineTo(tx(b.x), ty(b.y));
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+  }
+
+  // 円
+  ctx.strokeStyle = "#d98fc0";
+  ctx.lineWidth = 1.2;
+  for (const c of trc.circles) {
+    if (c.del) continue;
+    ctx.beginPath();
+    ctx.arc(tx(c.x), ty(c.y), Math.max(1, c.r * view.scale), 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  // 文字
+  if (chkMoji.checked) {
+    ctx.fillStyle = "#ffe08a";
+    ctx.font = "13px 'MS Gothic', monospace";
+    for (const m of trc.mojis) {
+      if (m.del || !m.text) continue;
+      ctx.save();
+      ctx.translate(tx(m.x), ty(m.y));
+      if (m.angle) ctx.rotate(-m.angle * Math.PI / 180);
+      ctx.fillText(m.text, 2, -2);
+      ctx.restore();
+    }
   }
 
   // 点とラベル
   ctx.font = "12px 'MS Gothic', monospace";
-  ctx.textBaseline = "alphabetic";
-  for (const p of points) {
+  for (const p of trc.points) {
+    if (p.notDisp) continue;
     const sx = tx(p.x), sy = ty(p.y);
     ctx.fillStyle = "#ff5c5c";
     ctx.beginPath();
     ctx.arc(sx, sy, 3.2, 0, Math.PI * 2);
     ctx.fill();
-
-    let label = "";
-    if (chkLabel.checked) label = p.name;
-    if (chkCode.checked && p.code) label += (label ? " " : "") + p.code;
-    if (label) {
+    if (chkLabel.checked && p.name) {
       ctx.fillStyle = "#e7e7e7";
-      ctx.fillText(label, sx + 6, sy - 6);
+      ctx.fillText(p.name, sx + 6, sy - 6);
     }
   }
 }
@@ -435,17 +625,18 @@ function render() { resizeCanvas(); draw(); }
 function loadDxf(text, name) {
   mode = "dxf";
   entities = parseDxf(text);
-  points = [];
+  trc = null;
   controls.classList.add("hidden");
   finishLoad(name, `${entities.length} エンティティ`);
 }
 
-function loadTrc(text, name) {
+function loadTrc(parsed, name) {
   mode = "trc";
-  points = parseTrc(text);
+  trc = parsed;
   entities = [];
   controls.classList.remove("hidden");
-  finishLoad(name, `${points.length} 点`);
+  const dispPts = trc.points.filter(p => !p.notDisp).length;
+  finishLoad(name, `点 ${dispPts} / 線 ${trc.lines.length} / 円 ${trc.circles.length} / 文字 ${trc.mojis.length}`);
 }
 
 function finishLoad(name, summary) {
@@ -454,30 +645,31 @@ function finishLoad(name, summary) {
   dropEl.classList.remove("empty");
   fitView();
   draw();
-  const kind = mode.toUpperCase();
-  info.textContent = `${name} — ${kind} / ${summary}`;
+  info.textContent = `${name} — ${mode.toUpperCase()} / ${summary}`;
 }
 
-function handleFile(file) {
+async function handleFile(file) {
   if (!file) return;
   const ext = (file.name.split(".").pop() || "").toLowerCase();
-  const reader = new FileReader();
-  reader.onerror = () => alert("ファイルの読み込みに失敗しました");
-  reader.onload = () => {
-    try {
-      if (ext === "trc") {
-        const text = decodeText(reader.result, true);  // SJIS 優先
-        loadTrc(text, file.name);
-      } else {
-        // .dxf もしくは拡張子不明は DXF として試行 (DXF は通常 ASCII/UTF-8)
-        const text = decodeText(reader.result, false);
-        loadDxf(text, file.name);
-      }
-    } catch (err) {
-      alert("解析に失敗しました: " + err.message);
+  try {
+    const buf = await file.arrayBuffer();
+    if (ext === "trc") {
+      const text = await readTrcText(buf);
+      loadTrc(parseTrc(text), file.name);
+    } else {
+      // .dxf もしくは拡張子不明は DXF として扱う (UTF-8 優先)
+      const text = decodeText(buf);
+      loadDxf(text, file.name);
     }
-  };
-  reader.readAsArrayBuffer(file);
+  } catch (err) {
+    alert("解析に失敗しました: " + (err && err.message ? err.message : err));
+  }
+}
+
+function decodeText(buf) {
+  const u8 = new Uint8Array(buf);
+  try { return new TextDecoder("utf-8", { fatal: false }).decode(u8); }
+  catch (e) { return new TextDecoder("shift_jis", { fatal: false }).decode(u8); }
 }
 
 document.getElementById("fileInput").addEventListener("change", (e) => {
@@ -526,7 +718,6 @@ canvas.addEventListener("mousedown", (e) => {
   dragging = true; lastX = e.clientX; lastY = e.clientY;
 });
 window.addEventListener("mousemove", (e) => {
-  // 座標表示
   if (hasData) {
     const rect = canvas.getBoundingClientRect();
     if (e.clientX >= rect.left && e.clientX <= rect.right &&
@@ -545,8 +736,7 @@ window.addEventListener("mousemove", (e) => {
 window.addEventListener("mouseup", () => { dragging = false; });
 canvas.addEventListener("dblclick", () => { if (hasData) { fitView(); draw(); } });
 
-// TRC 表示オプション
-[chkConnect, chkCode, chkLabel].forEach(chk =>
+[chkLine, chkLabel, chkMoji, chkFrame].forEach(chk =>
   chk.addEventListener("change", () => { if (mode === "trc") draw(); })
 );
 
