@@ -413,7 +413,7 @@ function parseTrc(text) {
 //   与点チェック(LevelYotenCheck): 既に確定済みの同名点があれば
 //     CK = 確定GH - 今回GH。|CK| >= LEVEL_YOTEN_LIMIT(=5mm) で不一致(error)。
 // ===========================================================================
-const LEVEL_YOTEN_LIMIT = 5; // frmTrCAD._LevelYotenLimit = 5 (mm)
+const LEVEL_YOTEN_LIMIT = 20; // frmTrCAD._LevelYotenLimit = 20 (mm)
 
 function computeLevels(levels) {
   const isNum = (s) => { s = (s == null ? "" : String(s)).trim(); return s !== "" && !isNaN(Number(s)); };
