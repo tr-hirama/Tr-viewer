@@ -3,6 +3,9 @@
  , SAMPLE-PC , 2026/05/30 12:00:00
 *Section-End*
 *SurveyData-Section*
+1 , T1 , S0 , S1 , 120 , 30 , 15 , 42.500
+2 , T2 , S0 , S1 , 95 , 12 , 40 , 50.120
+3 , T3 , S0 , T2 , 60 , 45 , 0 , 38.900
 *Section-End*
 *Point-Section*
  S0 , 0 , 0 , 1 , 0 , 0 , 0
@@ -42,6 +45,9 @@
 *Photo-Section*
 *Section-End*
 *Level-Section*
+ BM1 , 1.234 , 0.987 , äÓèÄì_ , 12.500
+ TP1 , 1.500 , 1.120 , íÜä‘ì_ , 12.614
+ No1 , , 1.340 , ínî’ , 12.394
 *Section-End*
 *Mawariken-Section*
 *Section-End*

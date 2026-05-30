@@ -70,6 +70,28 @@
     padding: 4px 8px; border-radius: 4px;
     pointer-events: none;
   }
+
+  #panel {
+    position: absolute; top: 0; right: 0; bottom: 0;
+    width: 340px; max-width: 70%;
+    background: #252526; border-left: 1px solid #3f3f46;
+    overflow: auto; padding: 10px 12px;
+    font-size: 12px;
+  }
+  #panel.hidden { display: none; }
+  #panel h2 {
+    font-size: 12px; margin: 14px 0 6px; color: #9cdcfe;
+    border-bottom: 1px solid #3f3f46; padding-bottom: 3px;
+  }
+  #panel h2:first-child { margin-top: 0; }
+  #panel table { border-collapse: collapse; width: 100%; }
+  #panel th, #panel td {
+    border: 1px solid #3a3a3a; padding: 2px 5px;
+    text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums;
+  }
+  #panel th { background: #333337; color: #ccc; text-align: center; }
+  #panel td.l { text-align: left; }
+  #panel .empty { color: #777; }
 </style>
 </head>
 <body>
@@ -83,6 +105,7 @@
       <label><input type="checkbox" id="chkLabel" checked> 点名</label>
       <label><input type="checkbox" id="chkMoji" checked> 文字</label>
       <label><input type="checkbox" id="chkFrame" checked> 図枠</label>
+      <label><input type="checkbox" id="chkPanel"> レベル/測角</label>
     </div>
     <span id="info"></span>
   </header>
@@ -95,6 +118,7 @@
     </div>
     <div id="hud">ホイール: 拡大縮小 / ドラッグ: 移動 / ダブルクリック: 全体表示</div>
     <div id="coord"></div>
+    <div id="panel" class="hidden"></div>
   </div>
 
 <script>
@@ -307,7 +331,8 @@ const num = (v) => { const f = parseFloat(v); return isFinite(f) ? f : 0; };
 function parseTrc(text) {
   const trc = {
     points: [], lines: [], circles: [], mojis: [],
-    hedges: [], plines: [], blocks: new Map(), inserts: []
+    hedges: [], plines: [], blocks: new Map(), inserts: [],
+    levels: [], surveyData: []
   };
   let section = null;
   let inBlockPts = false, inPlinePts = false;
@@ -351,6 +376,15 @@ function parseTrc(text) {
       case "*Insert-Section*":
         trc.inserts.push({ name: f[0], layer: f[1], block: f[2], x: num(f[3]), y: num(f[4]), angle: num(f[5]) });
         break;
+      case "*Level-Section*":
+        // 測点名, BS(後視), FS(前視), 備考, [TP(地盤高)]
+        trc.levels.push({ name: f[0], bs: f[1], fs: f[2], remarks: f[3] || "", tp: f.length > 4 ? f[4] : "" });
+        break;
+      case "*SurveyData-Section*":
+        // ID, 測点名, 器械点, 後視点, 度, 分, 秒, 距離, [区分]
+        trc.surveyData.push({ id: f[0], name: f[1], ip: f[2], bs: f[3],
+                              deg: f[4], min: f[5], sec: f[6], dist: f[7], kubun: f.length > 8 ? f[8] : "" });
+        break;
       case "*Pline-Section*":
         if (inPlinePts) { if (curPline) curPline.pts.push({ x: num(f[0]), y: num(f[1]) }); }
         else { curPline = { name: f[0], pts: [] }; trc.plines.push(curPline); }
@@ -380,6 +414,8 @@ const chkLine = document.getElementById("chkLine");
 const chkLabel = document.getElementById("chkLabel");
 const chkMoji = document.getElementById("chkMoji");
 const chkFrame = document.getElementById("chkFrame");
+const chkPanel = document.getElementById("chkPanel");
+const panel = document.getElementById("panel");
 
 let mode = null;          // "dxf" | "trc"
 let entities = [];        // DXF
@@ -627,6 +663,7 @@ function loadDxf(text, name) {
   entities = parseDxf(text);
   trc = null;
   controls.classList.add("hidden");
+  panel.classList.add("hidden");
   finishLoad(name, `${entities.length} エンティティ`);
 }
 
@@ -635,8 +672,51 @@ function loadTrc(parsed, name) {
   trc = parsed;
   entities = [];
   controls.classList.remove("hidden");
+  // レベル/測角データがあれば自動でパネルを開く
+  chkPanel.checked = (trc.levels.length > 0 || trc.surveyData.length > 0);
+  renderPanel();
+  updatePanelVisibility();
   const dispPts = trc.points.filter(p => !p.notDisp).length;
   finishLoad(name, `点 ${dispPts} / 線 ${trc.lines.length} / 円 ${trc.circles.length} / 文字 ${trc.mojis.length}`);
+}
+
+const esc = (s) => String(s == null ? "" : s).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+
+// レベル / 測角データを表として描画
+function renderPanel() {
+  if (mode !== "trc") { panel.innerHTML = ""; return; }
+  let html = "";
+
+  html += "<h2>測角データ（観測）</h2>";
+  if (trc.surveyData.length) {
+    html += "<table><tr><th>測点</th><th>器械点</th><th>後視</th><th>度</th><th>分</th><th>秒</th><th>距離</th></tr>";
+    for (const s of trc.surveyData) {
+      html += `<tr><td class="l">${esc(s.name)}</td><td class="l">${esc(s.ip)}</td><td class="l">${esc(s.bs)}</td>`
+            + `<td>${esc(s.deg)}</td><td>${esc(s.min)}</td><td>${esc(s.sec)}</td><td>${esc(s.dist)}</td></tr>`;
+    }
+    html += "</table>";
+  } else {
+    html += '<div class="empty">データなし</div>';
+  }
+
+  html += "<h2>レベル（水準）</h2>";
+  if (trc.levels.length) {
+    html += "<table><tr><th>測点</th><th>BS(後視)</th><th>FS(前視)</th><th>TP(地盤高)</th><th>備考</th></tr>";
+    for (const l of trc.levels) {
+      html += `<tr><td class="l">${esc(l.name)}</td><td>${esc(l.bs)}</td><td>${esc(l.fs)}</td>`
+            + `<td>${esc(l.tp)}</td><td class="l">${esc(l.remarks)}</td></tr>`;
+    }
+    html += "</table>";
+  } else {
+    html += '<div class="empty">データなし</div>';
+  }
+
+  panel.innerHTML = html;
+}
+
+function updatePanelVisibility() {
+  const show = mode === "trc" && chkPanel.checked;
+  panel.classList.toggle("hidden", !show);
 }
 
 function finishLoad(name, summary) {
@@ -739,6 +819,7 @@ canvas.addEventListener("dblclick", () => { if (hasData) { fitView(); draw(); } 
 [chkLine, chkLabel, chkMoji, chkFrame].forEach(chk =>
   chk.addEventListener("change", () => { if (mode === "trc") draw(); })
 );
+chkPanel.addEventListener("change", updatePanelVisibility);
 
 window.addEventListener("resize", render);
 resizeCanvas();
