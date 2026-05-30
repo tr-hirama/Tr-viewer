@@ -33,6 +33,19 @@
     white-space: nowrap;
   }
   #fileLabel:hover { background: #1177bb; }
+  #saveBtn {
+    font-size: 12px;
+    background: #3a7d44;
+    color: #fff;
+    border: none;
+    padding: 5px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    white-space: nowrap;
+    font-family: inherit;
+  }
+  #saveBtn:hover { background: #469152; }
+  #saveBtn.hidden { display: none; }
 
   #stage { position: relative; flex: 1 1 auto; overflow: hidden; }
   canvas { display: block; width: 100%; height: 100%; background: #111; }
@@ -104,6 +117,7 @@
     <label id="fileLabel">ファイルを開く
       <input id="fileInput" type="file" accept=".dxf,.trc" hidden>
     </label>
+    <button id="saveBtn" class="hidden" title="表示中の図面を DXF (R12) で保存">DXF保存</button>
     <div id="controls" class="hidden">
       <label><input type="checkbox" id="chkLine" checked> 線</label>
       <label><input type="checkbox" id="chkLabel" checked> 点名</label>
@@ -478,8 +492,10 @@ const chkLabel = document.getElementById("chkLabel");
 const chkMoji = document.getElementById("chkMoji");
 const chkFrame = document.getElementById("chkFrame");
 const chkPanel = document.getElementById("chkPanel");
+const saveBtn = document.getElementById("saveBtn");
 
 let mode = null;          // "dxf" | "trc"
+let currentName = "";     // 読み込み中ファイル名
 let entities = [];        // DXF
 let trc = null;           // TRC
 let view = { scale: 1, ox: 0, oy: 0 };
@@ -811,8 +827,10 @@ function loadTrc(parsed, name) {
 
 function finishLoad(name, summary) {
   hasData = true;
+  currentName = name;
   dropEl.classList.add("hidden");
   dropEl.classList.remove("empty");
+  saveBtn.classList.remove("hidden");
   fitView();
   draw();
   info.textContent = `${name} — ${mode.toUpperCase()} / ${summary}`;
@@ -834,6 +852,204 @@ async function handleFile(file) {
     alert("解析に失敗しました: " + (err && err.message ? err.message : err));
   }
 }
+
+// ===========================================================================
+// DXF 書き出し (R12 ASCII) — cad-trcad frmTrCAD の DXF 出力を参考に実装
+//   ・座標は cad-trcad と同じく (値 - 最小) * 1000 (m→mm, 図面を原点付近へ)
+//   ・レイヤー: 先頭文字 K→KYO-0 / R→KYO / H→TATEMONO / 他→COUI
+//   ・点は POINT + 点名 TEXT、線/円/文字/生垣/ポリライン/図枠を出力
+//   ・ハンドル(5) を連番付与。HEADER/TABLES を付け CAD で開けるようにする
+// ===========================================================================
+const DXF_SCALE = 1000;
+
+// R12 のヘッダ + テーブル (使用レイヤー・線種・文字スタイルを定義)
+const DXF_PREAMBLE = [
+  "0","SECTION","2","HEADER",
+  "9","$ACADVER","1","AC1009",
+  "9","$INSBASE","10","0.0","20","0.0","30","0.0",
+  "9","$PDMODE","70","3",
+  "9","$PDSIZE","40","250.0",
+  "0","ENDSEC",
+  "0","SECTION","2","TABLES",
+  "0","TABLE","2","LTYPE","70","3",
+  "0","LTYPE","2","CONTINUOUS","70","0","3","Solid line","72","65","73","0","40","0.0",
+  "0","LTYPE","2","DASHED","70","0","3","Dashed","72","65","73","2","40","0.75","49","0.5","49","-0.25",
+  "0","LTYPE","2","HIDDEN","70","0","3","Hidden","72","65","73","2","40","0.45","49","0.25","49","-0.2",
+  "0","ENDTAB",
+  "0","TABLE","2","LAYER","70","6",
+  "0","LAYER","2","0","70","0","62","7","6","CONTINUOUS",
+  "0","LAYER","2","KYO-0","70","0","62","4","6","CONTINUOUS",
+  "0","LAYER","2","KYO","70","0","62","4","6","CONTINUOUS",
+  "0","LAYER","2","TATEMONO","70","0","62","3","6","CONTINUOUS",
+  "0","LAYER","2","COUI","70","0","62","2","6","CONTINUOUS",
+  "0","LAYER","2","KYOMOJI","70","0","62","1","6","CONTINUOUS",
+  "0","ENDTAB",
+  "0","TABLE","2","STYLE","70","1",
+  "0","STYLE","2","STANDARD","70","0","40","0.0","41","1.0","50","0.0","71","0","42","2.5","3","txt","4","",
+  "0","ENDTAB",
+  "0","ENDSEC"
+];
+
+// レイヤー先頭文字 -> DXF レイヤー名 (cad-trcad 準拠)
+function dxfLayerOf(layer) {
+  const c = (layer || "").charAt(0).toUpperCase();
+  if (c === "K") return "KYO-0";
+  if (c === "R") return "KYO";
+  if (c === "H") return "TATEMONO";
+  return "COUI";
+}
+
+// グループコード/値の配列を DXF テキストへ
+function buildDxf(body) {
+  const all = DXF_PREAMBLE.concat(
+    ["0","SECTION","2","ENTITIES"], body, ["0","ENDSEC","0","EOF"]
+  );
+  return all.join("\r\n") + "\r\n";
+}
+
+// POLYLINE / VERTEX / SEQEND を body 配列へ追加
+function pushPolyline(body, h, pts, layer, closed) {
+  body.push("0","POLYLINE","8",layer,"5",h(),"66","1","70",closed ? "1" : "0",
+            "10","0.0","20","0.0","30","0.0");
+  for (const v of pts) {
+    body.push("0","VERTEX","8",layer,"5",h(),"10",v.x,"20",v.y,"30","0.0");
+  }
+  body.push("0","SEQEND","8",layer,"5",h());
+}
+
+// TRC データを DXF (R12) へ変換
+function trcToDxf(trc) {
+  let minX = Infinity, minY = Infinity;
+  const ext = (x, y) => { if (x < minX) minX = x; if (y < minY) minY = y; };
+  for (const p of trc.points) ext(p.x, p.y);
+  for (const c of trc.circles) ext(c.x - c.r, c.y - c.r);
+  for (const m of trc.mojis) ext(m.x, m.y);
+  for (const hd of trc.hedges) { ext(hd.x1, hd.y1); ext(hd.x2, hd.y2); }
+  for (const pl of trc.plines) for (const v of pl.pts) ext(v.x, v.y);
+  for (const ins of trc.inserts) {
+    const blk = trc.blocks.get(ins.block);
+    if (blk) for (const v of blk.pts) ext(v.x + ins.x, v.y + ins.y);
+  }
+  if (!isFinite(minX)) { minX = 0; minY = 0; }
+  const X = (x) => ((x - minX) * DXF_SCALE).toFixed(3);
+  const Y = (y) => ((y - minY) * DXF_SCALE).toFixed(3);
+
+  let cnt = 256;
+  const h = () => (cnt++).toString(16).toUpperCase();
+  const body = [];
+
+  // 点 (POINT + 点名 TEXT)
+  for (const p of trc.points) {
+    if (p.notDisp) continue;
+    body.push("0","POINT","8","0","5",h(),"10",X(p.x),"20",Y(p.y),"30","0.0");
+    if (p.name) {
+      body.push("0","TEXT","8","0","5",h(),
+        "10",((p.x - minX) * DXF_SCALE - (150 + 250 * (p.name.length - 1))).toFixed(3),
+        "20",((p.y - minY) * DXF_SCALE + 300).toFixed(3),"30","0.0",
+        "40","500.0","1",p.name,"7","STANDARD");
+    }
+  }
+  // 線 (点名 pnA/pnB を解決)
+  for (const ln of trc.lines) {
+    if (ln.del) continue;
+    const a = trc.pointMap.get(ln.pnA), b = trc.pointMap.get(ln.pnB);
+    if (!a || !b) continue;
+    body.push("0","LINE","8",dxfLayerOf(ln.layer),"5",h());
+    if (ln.style === 2) body.push("6","DASHED");
+    body.push("10",X(a.x),"20",Y(a.y),"30","0.0","11",X(b.x),"21",Y(b.y),"31","0.0");
+  }
+  // 円
+  for (const c of trc.circles) {
+    if (c.del) continue;
+    body.push("0","CIRCLE","8",dxfLayerOf(c.layer),"5",h(),
+      "10",X(c.x),"20",Y(c.y),"30","0.0","40",(c.r * DXF_SCALE).toFixed(3));
+  }
+  // 文字
+  for (const m of trc.mojis) {
+    if (m.del || !m.text) continue;
+    body.push("0","TEXT","8","0","5",h(),"10",X(m.x),"20",Y(m.y),"30","0.0",
+      "40","200.0","1",m.text,"7","STANDARD");
+    if (m.angle) body.push("50",(360 - m.angle).toString());
+  }
+  // 生垣ライン
+  for (const hd of trc.hedges) {
+    body.push("0","LINE","8","TATEMONO","5",h(),
+      "10",X(hd.x1),"20",Y(hd.y1),"30","0.0","11",X(hd.x2),"21",Y(hd.y2),"31","0.0");
+  }
+  // ポリライン
+  for (const pl of trc.plines) {
+    if (pl.pts.length < 2) continue;
+    pushPolyline(body, h, pl.pts.map(v => ({ x: X(v.x), y: Y(v.y) })), "COUI", false);
+  }
+  // 図枠 (Block を Insert 位置へ展開)
+  for (const ins of trc.inserts) {
+    const blk = trc.blocks.get(ins.block);
+    if (!blk || blk.pts.length < 2) continue;
+    pushPolyline(body, h, blk.pts.map(v => ({ x: X(v.x + ins.x), y: Y(v.y + ins.y) })), "0", false);
+  }
+  return buildDxf(body);
+}
+
+// 既存 DXF (パース済みエンティティ) を R12 として再出力
+function entitiesToDxf(entities) {
+  let cnt = 256;
+  const h = () => (cnt++).toString(16).toUpperCase();
+  const body = [];
+  const f = (v) => (v == null ? "0.0" : Number(v).toFixed(3));
+  for (const e of entities) {
+    const lay = e.props.layer || "0";
+    switch (e.type) {
+      case "LINE":
+        body.push("0","LINE","8",lay,"5",h(),
+          "10",f(e.props.x),"20",f(e.props.y),"30","0.0",
+          "11",f(e.props.x2),"21",f(e.props.y2),"31","0.0");
+        break;
+      case "CIRCLE":
+        body.push("0","CIRCLE","8",lay,"5",h(),
+          "10",f(e.props.x),"20",f(e.props.y),"30","0.0","40",f(e.props.r));
+        break;
+      case "ARC":
+        body.push("0","ARC","8",lay,"5",h(),
+          "10",f(e.props.x),"20",f(e.props.y),"30","0.0","40",f(e.props.r),
+          "50",f(e.props.startAngle),"51",f(e.props.endAngle));
+        break;
+      case "POINT":
+        body.push("0","POINT","8",lay,"5",h(),"10",f(e.props.x),"20",f(e.props.y),"30","0.0");
+        break;
+      case "TEXT":
+      case "MTEXT":
+        body.push("0","TEXT","8",lay,"5",h(),"10",f(e.props.x),"20",f(e.props.y),"30","0.0",
+          "40",f(e.props.height || 200),"1",e.props.text || "","7","STANDARD");
+        break;
+      case "LWPOLYLINE":
+      case "POLYLINE":
+        if (e.vertices.length >= 2)
+          pushPolyline(body, h, e.vertices.map(v => ({ x: f(v.x), y: f(v.y) })), lay, !!(e.props.flags & 1));
+        break;
+    }
+  }
+  return buildDxf(body);
+}
+
+function saveDxf() {
+  if (!hasData) return;
+  const base = (currentName || "drawing").replace(/\.[^.]*$/, "");
+  let text;
+  if (mode === "trc") text = trcToDxf(trc);
+  else if (mode === "dxf") text = entitiesToDxf(entities);
+  else return;
+  const blob = new Blob([text], { type: "application/dxf" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = base + ".dxf";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+saveBtn.addEventListener("click", saveDxf);
 
 document.getElementById("fileInput").addEventListener("change", (e) => {
   handleFile(e.target.files[0]);
