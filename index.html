@@ -682,6 +682,27 @@ function loadTrc(parsed, name) {
 
 const esc = (s) => String(s == null ? "" : s).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
 
+// レベル（水準）の器械高式計算 — cad-trcad MakeLevelLabel と同じロジック
+//   後視あり: IH(器械高) = GH(地盤高) + BS
+//   前視あり: GH = IH - FS
+//   先頭点: TP を初期地盤高として GH=TP, IH=GH+BS
+function computeLevels(levels) {
+  const pf = (v) => { const f = parseFloat(v); return isFinite(f) ? f : null; };
+  let gh = 0, ih = 0;
+  return levels.map((l, idx) => {
+    const bs = pf(l.bs), fs = pf(l.fs), tp = pf(l.tp);
+    if (bs != null) ih = gh + bs;        // 後視 → 器械高
+    let rowGh = null;
+    if (fs != null) { gh = ih - fs; rowGh = gh; } // 前視 → 地盤高
+    if (idx === 0 && tp != null) {        // 先頭は TP を既知地盤高に
+      gh = tp; rowGh = gh;
+      if (bs != null) ih = gh + bs;
+    }
+    return { name: l.name, bs: l.bs, fs: l.fs, remarks: l.remarks,
+             ih: (bs != null || idx === 0) ? ih : null, gh: rowGh };
+  });
+}
+
 // レベル / 測角データを表として描画
 function renderPanel() {
   if (mode !== "trc") { panel.innerHTML = ""; return; }
@@ -699,12 +720,15 @@ function renderPanel() {
     html += '<div class="empty">データなし</div>';
   }
 
-  html += "<h2>レベル（水準）</h2>";
+  html += "<h2>レベル（水準・器械高式）</h2>";
   if (trc.levels.length) {
-    html += "<table><tr><th>測点</th><th>BS(後視)</th><th>FS(前視)</th><th>TP(地盤高)</th><th>備考</th></tr>";
-    for (const l of trc.levels) {
-      html += `<tr><td class="l">${esc(l.name)}</td><td>${esc(l.bs)}</td><td>${esc(l.fs)}</td>`
-            + `<td>${esc(l.tp)}</td><td class="l">${esc(l.remarks)}</td></tr>`;
+    const calc = computeLevels(trc.levels);
+    const fmt = (v) => (v == null || !isFinite(v)) ? "" : v.toFixed(3);
+    html += "<table><tr><th>測点</th><th>BS(後視)</th><th>FS(前視)</th>"
+          + "<th>器械高(IH)</th><th>地盤高(GH)</th><th>備考</th></tr>";
+    for (const r of calc) {
+      html += `<tr><td class="l">${esc(r.name)}</td><td>${esc(r.bs)}</td><td>${esc(r.fs)}</td>`
+            + `<td>${fmt(r.ih)}</td><td>${fmt(r.gh)}</td><td class="l">${esc(r.remarks)}</td></tr>`;
     }
     html += "</table>";
   } else {
