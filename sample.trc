@@ -45,9 +45,10 @@
 *Photo-Section*
 *Section-End*
 *Level-Section*
- BM1 , 1.234 , 0.987 , 基準点 , 12.500
- TP1 , 1.500 , 1.120 , 中間点 , 12.614
- No1 , , 1.340 , 地盤 , 12.394
+ KP1 , 1542 ,  , 基準点 , 
+ No1 ,  ,  , 中間点 , 1320
+ No2 ,  ,  , 中間点 , 1605
+ KP2 ,  , 1488 , もり替点 , 
 *Section-End*
 *Mawariken-Section*
 *Section-End*
