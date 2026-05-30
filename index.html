@@ -93,6 +93,7 @@
   #panel td.l { text-align: left; }
   #panel td.plus { color: #7fd17f; }
   #panel td.minus { color: #f08a8a; }
+  #panel td.err { background: #5a1f1f; color: #ffb3b3; font-weight: bold; }
   #panel .empty { color: #777; }
   #panel .note { color: #888; margin: 4px 0 0; font-size: 11px; }
 </style>
@@ -409,7 +410,11 @@ function parseTrc(text) {
 //   ・中間(TP)が数値 → GH = LevelBS - TP + LevelGH (中間点)
 //   ・BS が "[点名]" 参照 + FS/TP 数値 → 参照点 GH + FS/TP
 //   分岐の優先順位は VB と同じ (BS数値 → 点参照 → FS → TP)。
+//   与点チェック(LevelYotenCheck): 既に確定済みの同名点があれば
+//     CK = 確定GH - 今回GH。|CK| >= LEVEL_YOTEN_LIMIT(=5mm) で不一致(error)。
 // ===========================================================================
+const LEVEL_YOTEN_LIMIT = 5; // frmTrCAD._LevelYotenLimit = 5 (mm)
+
 function computeLevels(levels) {
   const isNum = (s) => { s = (s == null ? "" : String(s)).trim(); return s !== "" && !isNaN(Number(s)); };
   const toInt = (s) => Math.round(Number(String(s).trim())); // VB CInt 相当 (四捨五入)
@@ -422,6 +427,7 @@ function computeLevels(levels) {
     const FS = (l.fs || "").trim();
     const TP = (l.tp || "").trim();
     let gh = null;
+    let yotenCheck = false; // VB で LevelYotenCheck を呼ぶケースか
 
     if (NM === "") {
       // 点名が空 → スキップ
@@ -438,15 +444,22 @@ function computeLevels(levels) {
     } else if (BS.startsWith("[") && (isNum(FS) || isNum(TP))) {
       const referNM = BS.substring(1).replace("]", "");
       const ref = fixed.find(r => r.name === referNM);
-      if (ref) gh = ref.gh + (isNum(FS) ? toInt(FS) : toInt(TP));
+      if (ref) { gh = ref.gh + (isNum(FS) ? toInt(FS) : toInt(TP)); yotenCheck = true; }
     } else if (isNum(FS)) {
-      gh = levelBS - toInt(FS) + levelGH;
+      gh = levelBS - toInt(FS) + levelGH; yotenCheck = true;
     } else if (isNum(TP)) {
-      gh = levelBS - toInt(TP) + levelGH;
+      gh = levelBS - toInt(TP) + levelGH; yotenCheck = true;
+    }
+
+    // 与点チェック: 確定済みの同名点との GH 差分
+    let ck = null, ckError = false;
+    if (yotenCheck && gh != null) {
+      const prior = fixed.find(r => r.name === NM);
+      if (prior) { ck = prior.gh - gh; ckError = Math.abs(ck) >= LEVEL_YOTEN_LIMIT; }
     }
 
     if (NM !== "" && gh != null) fixed.push({ name: NM, gh });
-    return { name: l.name, bs: l.bs, fs: l.fs, tp: l.tp, remarks: l.remarks, gh };
+    return { name: l.name, bs: l.bs, fs: l.fs, tp: l.tp, remarks: l.remarks, gh, ck, ckError };
   });
 }
 
@@ -730,8 +743,9 @@ function renderPanel() {
   html += "<h2>レベル（水準）</h2>";
   if (trc.levels.length) {
     const calc = computeLevels(trc.levels);
+    let ckErrors = 0;
     html += "<table><tr><th>測点</th><th>BS(後視)</th><th>FS(前視)</th><th>TP(中間)</th>"
-          + "<th>高さ(GH)</th><th>備考</th></tr>";
+          + "<th>高さ(GH)</th><th>CK(較差)</th><th>備考</th></tr>";
     for (const r of calc) {
       let ghCell = '<td class="empty"></td>';
       if (r.gh != null && isFinite(r.gh)) {
@@ -739,11 +753,20 @@ function renderPanel() {
         const sign = r.gh > 0 ? "＋" + r.gh : (r.gh < 0 ? "－" + Math.abs(r.gh) : "±0");
         ghCell = `<td class="${cls}">${sign}</td>`;
       }
+      let ckCell = '<td class="empty"></td>';
+      if (r.ck != null) {
+        if (r.ckError) ckErrors++;
+        ckCell = `<td class="${r.ckError ? "err" : ""}" title="${r.ckError ? "与点の高さが合っていません（|較差| ≧ " + LEVEL_YOTEN_LIMIT + "mm）" : "許容内"}">${r.ck}</td>`;
+      }
       html += `<tr><td class="l">${esc(r.name)}</td><td>${esc(r.bs)}</td><td>${esc(r.fs)}</td>`
-            + `<td>${esc(r.tp)}</td>${ghCell}<td class="l">${esc(r.remarks)}</td></tr>`;
+            + `<td>${esc(r.tp)}</td>${ghCell}${ckCell}<td class="l">${esc(r.remarks)}</td></tr>`;
     }
     html += "</table>";
     html += '<p class="note">高さ(GH)は基準点を ±0 とした相対値（mm）。Tr-CAD 器械高式で再計算。</p>';
+    html += `<p class="note">CK(較差)=確定済み同名点との GH 差。|較差| ≧ ${LEVEL_YOTEN_LIMIT}mm で不一致（赤）。</p>`;
+    if (ckErrors > 0) {
+      html += `<p class="note" style="color:#f08a8a">⚠ 与点の高さが合っていない点が ${ckErrors} 件あります。</p>`;
+    }
   } else {
     html += '<div class="empty">データなし</div>';
   }
