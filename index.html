@@ -119,7 +119,7 @@
   <header>
     <div id="titleBox">
       <h1>DXF / TRC ビューワー</h1>
-      <span id="version">v1.1.0</span>
+      <span id="version">v0.2.0</span>
     </div>
     <label id="fileLabel">ファイルを開く
       <input id="fileInput" type="file" accept=".dxf,.trc" hidden>
@@ -147,7 +147,7 @@
       <div id="coord"></div>
     </div>
     <div id="splitter"></div>
-    <div id="panel" class="hidden"></div>
+    <div id="panel"></div>
   </div>
 
 <script>
@@ -830,8 +830,8 @@ function renderPanel() {
 }
 
 function updatePanelVisibility() {
-  // 左右分割では右ペインはデータ読込後は常時表示（中身は renderPanel が制御）
-  panel.classList.toggle("hidden", !hasData);
+  // 右ペインは常時表示（読込前は空、中身は renderPanel が制御）
+  panel.classList.remove("hidden");
 }
 
 // ===========================================================================
