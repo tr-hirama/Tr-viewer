@@ -112,6 +112,28 @@
   }
   #panel .tab:hover { background: #3f3f46; color: #fff; }
   #panel .tab.active { background: #0e639c; border-color: #0e639c; color: #fff; }
+
+  /* モバイル: 図面/データ 切替ボタン (スマホのみ表示) */
+  #viewToggle {
+    display: none;
+    font-size: 12px; font-family: inherit;
+    background: #5a3d8c; color: #fff; border: none;
+    padding: 5px 12px; border-radius: 4px; cursor: pointer; white-space: nowrap;
+  }
+  #viewToggle:hover { background: #6c4ba6; }
+  #viewToggle.hidden { display: none; }
+
+  /* スマホ幅: 画面分割せず、図面/データをボタンで全面切替 */
+  @media (max-width: 768px) {
+    #splitter { display: none; }
+    #stage, #panel { flex: 1 1 100% !important; width: 100%; min-width: 0; }
+    #panel { display: none; }
+    #main.view-panel #stage { display: none; }
+    #main.view-panel #panel { display: block; }
+    #viewToggle { display: inline-block; }
+    #viewToggle.hidden { display: none; }
+    header { gap: 8px; }
+  }
   #panel table { border-collapse: collapse; width: 100%; }
   #panel th, #panel td {
     border: 1px solid #3a3a3a; padding: 2px 5px;
@@ -130,12 +152,13 @@
   <header>
     <div id="titleBox">
       <h1>DXF / TRC ビューワー</h1>
-      <span id="version">v0.8.0</span>
+      <span id="version">v0.9.0</span>
     </div>
     <label id="fileLabel">ファイルを開く
       <input id="fileInput" type="file" accept=".dxf,.trc" hidden>
     </label>
     <button id="saveBtn" class="hidden" title="表示中の図面を DXF (R12) で保存">DXF保存</button>
+    <button id="viewToggle" class="hidden" title="図面とデータを切り替え">📋 データ</button>
     <div id="controls" class="hidden">
       <label><input type="checkbox" id="chkLine" checked> 線</label>
       <label><input type="checkbox" id="chkLabel" checked> 点名</label>
@@ -542,6 +565,7 @@ const chkLabel = document.getElementById("chkLabel");
 const chkMoji = document.getElementById("chkMoji");
 const chkFrame = document.getElementById("chkFrame");
 const saveBtn = document.getElementById("saveBtn");
+const viewToggle = document.getElementById("viewToggle");
 
 let mode = null;          // "dxf" | "trc"
 let currentName = "";     // 読み込み中ファイル名
@@ -1037,6 +1061,9 @@ function finishLoad(name, summary) {
   dropEl.classList.add("hidden");
   dropEl.classList.remove("empty");
   saveBtn.classList.remove("hidden");
+  viewToggle.classList.remove("hidden");
+  mainEl.classList.remove("view-panel"); // 読込時はまず図面を全面表示 (スマホ)
+  viewToggle.textContent = "📋 データ";
   updatePanelVisibility();
   resizeCanvas();
   fitView();
@@ -1328,6 +1355,15 @@ window.addEventListener("mouseup", () => { splitDrag = false; });
 [chkLine, chkLabel, chkMoji, chkFrame].forEach(chk =>
   chk.addEventListener("change", () => { if (mode === "trc") draw(); })
 );
+
+// スマホ: 図面 ⇄ データ を全面切替
+viewToggle.addEventListener("click", () => {
+  const showPanel = !mainEl.classList.contains("view-panel");
+  mainEl.classList.toggle("view-panel", showPanel);
+  viewToggle.textContent = showPanel ? "📐 図面" : "📋 データ";
+  if (showPanel) renderPanel();
+  else render(); // 図面に戻す際はキャンバス再計測
+});
 
 window.addEventListener("resize", render);
 resizeCanvas();
