@@ -123,7 +123,8 @@
       <label><input type="checkbox" id="chkLabel" checked> 点名</label>
       <label><input type="checkbox" id="chkMoji" checked> 文字</label>
       <label><input type="checkbox" id="chkFrame" checked> 図枠</label>
-      <label><input type="checkbox" id="chkPanel"> レベル/測角</label>
+      <label><input type="checkbox" id="chkLevel"> レベル</label>
+      <label><input type="checkbox" id="chkSurvey"> 測角</label>
     </div>
     <span id="info"></span>
   </header>
@@ -491,7 +492,8 @@ const chkLine = document.getElementById("chkLine");
 const chkLabel = document.getElementById("chkLabel");
 const chkMoji = document.getElementById("chkMoji");
 const chkFrame = document.getElementById("chkFrame");
-const chkPanel = document.getElementById("chkPanel");
+const chkLevel = document.getElementById("chkLevel");
+const chkSurvey = document.getElementById("chkSurvey");
 const saveBtn = document.getElementById("saveBtn");
 
 let mode = null;          // "dxf" | "trc"
@@ -746,6 +748,7 @@ function renderPanel() {
   let html = "";
 
   // 測角データ
+  if (chkSurvey.checked) {
   html += "<h2>測角データ（観測）</h2>";
   if (trc.surveyData.length) {
     html += "<table><tr><th>測点</th><th>器械点</th><th>後視</th><th>度</th><th>分</th><th>秒</th><th>距離</th></tr>";
@@ -757,8 +760,10 @@ function renderPanel() {
   } else {
     html += '<div class="empty">データなし</div>';
   }
+  }
 
   // レベル（水準）
+  if (chkLevel.checked) {
   html += "<h2>レベル（水準）</h2>";
   if (trc.levels.length) {
     const calc = computeLevels(trc.levels);
@@ -789,12 +794,13 @@ function renderPanel() {
   } else {
     html += '<div class="empty">データなし</div>';
   }
+  }
 
   panel.innerHTML = html;
 }
 
 function updatePanelVisibility() {
-  const show = mode === "trc" && chkPanel.checked;
+  const show = mode === "trc" && (chkLevel.checked || chkSurvey.checked);
   panel.classList.toggle("hidden", !show);
 }
 
@@ -821,7 +827,8 @@ function loadTrc(parsed, name) {
   trc = parsed;
   entities = [];
   controls.classList.remove("hidden");
-  chkPanel.checked = (trc.levels.length > 0 || trc.surveyData.length > 0);
+  chkLevel.checked = (trc.levels.length > 0);
+  chkSurvey.checked = (trc.surveyData.length > 0);
   renderPanel();
   updatePanelVisibility();
   const dispPts = trc.points.filter(p => !p.notDisp).length;
@@ -1121,7 +1128,9 @@ canvas.addEventListener("dblclick", () => { if (hasData) { fitView(); draw(); } 
 [chkLine, chkLabel, chkMoji, chkFrame].forEach(chk =>
   chk.addEventListener("change", () => { if (mode === "trc") draw(); })
 );
-chkPanel.addEventListener("change", updatePanelVisibility);
+[chkLevel, chkSurvey].forEach(chk =>
+  chk.addEventListener("change", () => { renderPanel(); updatePanelVisibility(); })
+);
 
 window.addEventListener("resize", render);
 resizeCanvas();
