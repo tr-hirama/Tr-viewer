@@ -49,7 +49,10 @@
   #saveBtn:hover { background: #469152; }
   #saveBtn.hidden { display: none; }
 
-  #stage { position: relative; flex: 1 1 auto; overflow: hidden; }
+  #main { display: flex; flex: 1 1 auto; min-height: 0; }
+  #stage { position: relative; flex: 2 1 0; min-width: 0; overflow: hidden; }
+  #splitter { flex: 0 0 6px; background: #3f3f46; cursor: col-resize; }
+  #splitter:hover { background: #5a5a64; }
   canvas { display: block; width: 100%; height: 100%; background: #111; }
 
   #drop {
@@ -87,9 +90,8 @@
   }
 
   #panel {
-    position: absolute; top: 0; right: 0; bottom: 0;
-    width: 360px; max-width: 75%;
-    background: #252526; border-left: 1px solid #3f3f46;
+    flex: 1 1 0; min-width: 0;
+    background: #252526;
     overflow: auto; padding: 10px 12px;
     font-size: 12px;
   }
@@ -117,7 +119,7 @@
   <header>
     <div id="titleBox">
       <h1>DXF / TRC ビューワー</h1>
-      <span id="version">v1.0.0</span>
+      <span id="version">v1.1.0</span>
     </div>
     <label id="fileLabel">ファイルを開く
       <input id="fileInput" type="file" accept=".dxf,.trc" hidden>
@@ -134,14 +136,17 @@
     <span id="info"></span>
   </header>
 
-  <div id="stage">
-    <canvas id="canvas"></canvas>
-    <div id="drop" class="empty">
-      <div class="big">📐 DXF / TRC ファイルをここにドロップ</div>
-      <div class="small">またはヘッダーの「ファイルを開く」から選択（.dxf / .trc）</div>
+  <div id="main">
+    <div id="stage">
+      <canvas id="canvas"></canvas>
+      <div id="drop" class="empty">
+        <div class="big">📐 DXF / TRC ファイルをここにドロップ</div>
+        <div class="small">またはヘッダーの「ファイルを開く」から選択（.dxf / .trc）</div>
+      </div>
+      <div id="hud">ホイール: 拡大縮小 / ドラッグ: 移動 / ダブルクリック: 全体表示</div>
+      <div id="coord"></div>
     </div>
-    <div id="hud">ホイール: 拡大縮小 / ドラッグ: 移動 / ダブルクリック: 全体表示</div>
-    <div id="coord"></div>
+    <div id="splitter"></div>
     <div id="panel" class="hidden"></div>
   </div>
 
@@ -749,8 +754,28 @@ function render() { resizeCanvas(); draw(); }
 const esc = (s) => String(s == null ? "" : s).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
 
 function renderPanel() {
-  if (mode !== "trc") { panel.innerHTML = ""; return; }
+  if (!mode) { panel.innerHTML = ""; return; }
   let html = "";
+
+  if (mode === "dxf") {
+    const counts = {};
+    for (const e of entities) counts[e.type] = (counts[e.type] || 0) + 1;
+    html += "<h2>DXF エンティティ</h2><table><tr><th>種類</th><th>数</th></tr>";
+    for (const k of Object.keys(counts).sort())
+      html += `<tr><td class="l">${esc(k)}</td><td>${counts[k]}</td></tr>`;
+    html += `<tr><td class="l">合計</td><td>${entities.length}</td></tr></table>`;
+    panel.innerHTML = html;
+    return;
+  }
+
+  // 図形サマリ
+  html += "<h2>図形</h2><table>"
+    + `<tr><td class="l">点</td><td>${trc.points.filter(p => !p.notDisp).length}</td></tr>`
+    + `<tr><td class="l">線</td><td>${trc.lines.length}</td></tr>`
+    + `<tr><td class="l">円</td><td>${trc.circles.length}</td></tr>`
+    + `<tr><td class="l">文字</td><td>${trc.mojis.length}</td></tr>`
+    + `<tr><td class="l">生垣</td><td>${trc.hedges.length}</td></tr>`
+    + `<tr><td class="l">ポリライン</td><td>${trc.plines.length}</td></tr></table>`;
 
   // 測角データ
   if (chkSurvey.checked) {
@@ -805,8 +830,8 @@ function renderPanel() {
 }
 
 function updatePanelVisibility() {
-  const show = mode === "trc" && (chkLevel.checked || chkSurvey.checked);
-  panel.classList.toggle("hidden", !show);
+  // 左右分割では右ペインはデータ読込後は常時表示（中身は renderPanel が制御）
+  panel.classList.toggle("hidden", !hasData);
 }
 
 // ===========================================================================
@@ -823,7 +848,7 @@ function loadDxf(text, name) {
   entities = parseDxf(text);
   trc = null;
   controls.classList.add("hidden");
-  panel.classList.add("hidden");
+  renderPanel();
   finishLoad(name, `${entities.length} エンティティ`);
 }
 
@@ -846,6 +871,8 @@ function finishLoad(name, summary) {
   dropEl.classList.add("hidden");
   dropEl.classList.remove("empty");
   saveBtn.classList.remove("hidden");
+  updatePanelVisibility();
+  resizeCanvas();
   fitView();
   draw();
   info.textContent = `${name} — ${mode.toUpperCase()} / ${summary}`;
@@ -1129,6 +1156,22 @@ window.addEventListener("mousemove", (e) => {
 });
 window.addEventListener("mouseup", () => { dragging = false; });
 canvas.addEventListener("dblclick", () => { if (hasData) { fitView(); draw(); } });
+
+// 左右分割のリサイズ (初期比 2:1, ドラッグで調整)
+const splitter = document.getElementById("splitter");
+const mainEl = document.getElementById("main");
+let splitDrag = false;
+splitter.addEventListener("mousedown", (e) => { splitDrag = true; e.preventDefault(); });
+window.addEventListener("mousemove", (e) => {
+  if (!splitDrag) return;
+  const rect = mainEl.getBoundingClientRect();
+  let frac = (e.clientX - rect.left) / rect.width;
+  frac = Math.max(0.15, Math.min(0.85, frac));
+  stage.style.flexGrow = frac;
+  panel.style.flexGrow = (1 - frac);
+  render();
+});
+window.addEventListener("mouseup", () => { splitDrag = false; });
 
 [chkLine, chkLabel, chkMoji, chkFrame].forEach(chk =>
   chk.addEventListener("change", () => { if (mode === "trc") draw(); })
