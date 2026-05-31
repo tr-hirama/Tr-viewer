@@ -101,6 +101,17 @@
     border-bottom: 1px solid #3f3f46; padding-bottom: 3px;
   }
   #panel h2:first-child { margin-top: 0; }
+  #panel .tabs {
+    display: flex; gap: 4px; margin-bottom: 12px;
+    border-bottom: 1px solid #3f3f46; padding-bottom: 8px;
+  }
+  #panel .tab {
+    font-family: inherit; font-size: 12px; color: #cfcfcf;
+    background: #333337; border: 1px solid #3f3f46;
+    padding: 6px 12px; border-radius: 4px; cursor: pointer; white-space: nowrap;
+  }
+  #panel .tab:hover { background: #3f3f46; color: #fff; }
+  #panel .tab.active { background: #0e639c; border-color: #0e639c; color: #fff; }
   #panel table { border-collapse: collapse; width: 100%; }
   #panel th, #panel td {
     border: 1px solid #3a3a3a; padding: 2px 5px;
@@ -119,7 +130,7 @@
   <header>
     <div id="titleBox">
       <h1>DXF / TRC ビューワー</h1>
-      <span id="version">v0.7.0</span>
+      <span id="version">v0.8.0</span>
     </div>
     <label id="fileLabel">ファイルを開く
       <input id="fileInput" type="file" accept=".dxf,.trc" hidden>
@@ -130,8 +141,6 @@
       <label><input type="checkbox" id="chkLabel" checked> 点名</label>
       <label><input type="checkbox" id="chkMoji" checked> 文字</label>
       <label><input type="checkbox" id="chkFrame" checked> 図枠</label>
-      <label><input type="checkbox" id="chkLevel"> レベル</label>
-      <label><input type="checkbox" id="chkSurvey"> 測角</label>
     </div>
     <span id="info"></span>
   </header>
@@ -532,8 +541,6 @@ const chkLine = document.getElementById("chkLine");
 const chkLabel = document.getElementById("chkLabel");
 const chkMoji = document.getElementById("chkMoji");
 const chkFrame = document.getElementById("chkFrame");
-const chkLevel = document.getElementById("chkLevel");
-const chkSurvey = document.getElementById("chkSurvey");
 const saveBtn = document.getElementById("saveBtn");
 
 let mode = null;          // "dxf" | "trc"
@@ -901,14 +908,66 @@ function render() { resizeCanvas(); draw(); }
 // ===========================================================================
 const esc = (s) => String(s == null ? "" : s).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
 
+// 右ペインのタブ ("shape" | "survey" | "level")。cad-trcad のタブUIに合わせ別画面化
+let activeTab = "shape";
+
+function shapeHtml() {
+  return "<table>"
+    + `<tr><td class="l">点</td><td>${trc.points.filter(p => !p.notDisp).length}</td></tr>`
+    + `<tr><td class="l">線</td><td>${trc.lines.length}</td></tr>`
+    + `<tr><td class="l">円</td><td>${trc.circles.length}</td></tr>`
+    + `<tr><td class="l">文字</td><td>${trc.mojis.length}</td></tr>`
+    + `<tr><td class="l">生垣</td><td>${trc.hedges.length}</td></tr>`
+    + `<tr><td class="l">ポリライン</td><td>${trc.plines.length}</td></tr></table>`;
+}
+
+function surveyHtml() {
+  if (!trc.surveyData.length) return '<div class="empty">データなし</div>';
+  let html = "<table><tr><th>器械点</th><th>後視点</th><th>測点</th><th>水</th><th>平</th><th>角</th><th>距離</th><th>誤差</th></tr>";
+  for (const s of trc.surveyData) {
+    html += `<tr><td class="l">${esc(s.ip)}</td><td class="l">${esc(s.bs)}</td><td class="l">${esc(s.sokuten)}</td>`
+          + `<td>${esc(s.sui)}</td><td>${esc(s.hei)}</td><td>${esc(s.kaku)}</td><td>${esc(s.dist)}</td><td>${esc(s.err)}</td></tr>`;
+  }
+  return html + "</table>";
+}
+
+function levelHtml() {
+  if (!trc.levels.length) return '<div class="empty">データなし</div>';
+  const calc = computeLevels(trc.levels);
+  let ckErrors = 0;
+  let html = "<table><tr><th>測点</th><th>BS(後視)</th><th>FS(前視)</th><th>TP(中間)</th>"
+           + "<th>高さ(GH)</th><th>CK(較差)</th><th>備考</th></tr>";
+  for (const r of calc) {
+    let ghCell = '<td class="empty"></td>';
+    if (r.gh != null && isFinite(r.gh)) {
+      const cls = r.gh > 0 ? "plus" : (r.gh < 0 ? "minus" : "");
+      const sign = r.gh > 0 ? "＋" + r.gh : (r.gh < 0 ? "－" + Math.abs(r.gh) : "±0");
+      ghCell = `<td class="${cls}">${sign}</td>`;
+    }
+    let ckCell = '<td class="empty"></td>';
+    if (r.ck != null) {
+      if (r.ckError) ckErrors++;
+      ckCell = `<td class="${r.ckError ? "err" : ""}">${r.ck}</td>`;
+    }
+    html += `<tr><td class="l">${esc(r.name)}</td><td>${esc(r.bs)}</td><td>${esc(r.fs)}</td>`
+          + `<td>${esc(r.tp)}</td>${ghCell}${ckCell}<td class="l">${esc(r.remarks)}</td></tr>`;
+  }
+  html += "</table>";
+  html += '<p class="note">高さ(GH)は基準点を ±0 とした相対値（mm）。Tr-CAD 器械高式で再計算。</p>';
+  html += `<p class="note">CK(較差)=確定済み同名点との GH 差。|較差| ≧ ${LEVEL_YOTEN_LIMIT}mm で不一致（赤）。</p>`;
+  if (ckErrors > 0) {
+    html += `<p class="note" style="color:#f08a8a">⚠ 与点の高さが合っていない点が ${ckErrors} 件あります。</p>`;
+  }
+  return html;
+}
+
 function renderPanel() {
   if (!mode) { panel.innerHTML = ""; return; }
-  let html = "";
 
   if (mode === "dxf") {
     const counts = {};
     for (const e of entities) counts[e.type] = (counts[e.type] || 0) + 1;
-    html += "<h2>DXF エンティティ</h2><table><tr><th>種類</th><th>数</th></tr>";
+    let html = "<h2>DXF エンティティ</h2><table><tr><th>種類</th><th>数</th></tr>";
     for (const k of Object.keys(counts).sort())
       html += `<tr><td class="l">${esc(k)}</td><td>${counts[k]}</td></tr>`;
     html += `<tr><td class="l">合計</td><td>${entities.length}</td></tr></table>`;
@@ -916,65 +975,26 @@ function renderPanel() {
     return;
   }
 
-  // 図形サマリ
-  html += "<h2>図形</h2><table>"
-    + `<tr><td class="l">点</td><td>${trc.points.filter(p => !p.notDisp).length}</td></tr>`
-    + `<tr><td class="l">線</td><td>${trc.lines.length}</td></tr>`
-    + `<tr><td class="l">円</td><td>${trc.circles.length}</td></tr>`
-    + `<tr><td class="l">文字</td><td>${trc.mojis.length}</td></tr>`
-    + `<tr><td class="l">生垣</td><td>${trc.hedges.length}</td></tr>`
-    + `<tr><td class="l">ポリライン</td><td>${trc.plines.length}</td></tr></table>`;
-
-  // 測角データ (cad-trcad の測角データタブと同じ列)
-  if (chkSurvey.checked) {
-    html += "<h2>測角データ</h2>";
-    if (trc.surveyData.length) {
-      html += "<table><tr><th>器械点</th><th>後視点</th><th>測点</th><th>水</th><th>平</th><th>角</th><th>距離</th><th>誤差</th></tr>";
-      for (const s of trc.surveyData) {
-        html += `<tr><td class="l">${esc(s.ip)}</td><td class="l">${esc(s.bs)}</td><td class="l">${esc(s.sokuten)}</td>`
-              + `<td>${esc(s.sui)}</td><td>${esc(s.hei)}</td><td>${esc(s.kaku)}</td><td>${esc(s.dist)}</td><td>${esc(s.err)}</td></tr>`;
-      }
-      html += "</table>";
-    } else {
-      html += '<div class="empty">データなし</div>';
-    }
+  // TRC: 図形 / 測角データ / レベル（水準）を別タブ（別画面）に分離
+  const tabs = [
+    { key: "shape",  label: "図形" },
+    { key: "survey", label: "測角データ" },
+    { key: "level",  label: "レベル（水準）" },
+  ];
+  let html = '<div class="tabs">';
+  for (const t of tabs) {
+    html += `<button class="tab${activeTab === t.key ? " active" : ""}" data-tab="${t.key}">${t.label}</button>`;
   }
-
-  // レベル（水準）
-  if (chkLevel.checked) {
-    html += "<h2>レベル（水準）</h2>";
-    if (trc.levels.length) {
-      const calc = computeLevels(trc.levels);
-      let ckErrors = 0;
-      html += "<table><tr><th>測点</th><th>BS(後視)</th><th>FS(前視)</th><th>TP(中間)</th>"
-            + "<th>高さ(GH)</th><th>CK(較差)</th><th>備考</th></tr>";
-      for (const r of calc) {
-        let ghCell = '<td class="empty"></td>';
-        if (r.gh != null && isFinite(r.gh)) {
-          const cls = r.gh > 0 ? "plus" : (r.gh < 0 ? "minus" : "");
-          const sign = r.gh > 0 ? "＋" + r.gh : (r.gh < 0 ? "－" + Math.abs(r.gh) : "±0");
-          ghCell = `<td class="${cls}">${sign}</td>`;
-        }
-        let ckCell = '<td class="empty"></td>';
-        if (r.ck != null) {
-          if (r.ckError) ckErrors++;
-          ckCell = `<td class="${r.ckError ? "err" : ""}">${r.ck}</td>`;
-        }
-        html += `<tr><td class="l">${esc(r.name)}</td><td>${esc(r.bs)}</td><td>${esc(r.fs)}</td>`
-              + `<td>${esc(r.tp)}</td>${ghCell}${ckCell}<td class="l">${esc(r.remarks)}</td></tr>`;
-      }
-      html += "</table>";
-      html += '<p class="note">高さ(GH)は基準点を ±0 とした相対値（mm）。Tr-CAD 器械高式で再計算。</p>';
-      html += `<p class="note">CK(較差)=確定済み同名点との GH 差。|較差| ≧ ${LEVEL_YOTEN_LIMIT}mm で不一致（赤）。</p>`;
-      if (ckErrors > 0) {
-        html += `<p class="note" style="color:#f08a8a">⚠ 与点の高さが合っていない点が ${ckErrors} 件あります。</p>`;
-      }
-    } else {
-      html += '<div class="empty">データなし</div>';
-    }
-  }
-
+  html += "</div><div class=\"tabBody\">";
+  if (activeTab === "survey")      html += surveyHtml();
+  else if (activeTab === "level")  html += levelHtml();
+  else                             html += shapeHtml();
+  html += "</div>";
   panel.innerHTML = html;
+
+  panel.querySelectorAll(".tab").forEach(btn =>
+    btn.addEventListener("click", () => { activeTab = btn.dataset.tab; renderPanel(); })
+  );
 }
 
 function updatePanelVisibility() {
@@ -1005,8 +1025,7 @@ function loadTrc(parsed, name) {
   trc = parsed;
   entities = [];
   controls.classList.remove("hidden");
-  chkLevel.checked = (trc.levels.length > 0);
-  chkSurvey.checked = (trc.surveyData.length > 0);
+  activeTab = "shape";
   renderPanel();
   const dispPts = trc.points.filter(p => !p.notDisp).length;
   finishLoad(name, `点 ${dispPts} / 線 ${trc.lines.length} / 円 ${trc.circles.length} / 文字 ${trc.mojis.length}`);
@@ -1308,9 +1327,6 @@ window.addEventListener("mouseup", () => { splitDrag = false; });
 // 表示トグル
 [chkLine, chkLabel, chkMoji, chkFrame].forEach(chk =>
   chk.addEventListener("change", () => { if (mode === "trc") draw(); })
-);
-[chkLevel, chkSurvey].forEach(chk =>
-  chk.addEventListener("change", () => { renderPanel(); })
 );
 
 window.addEventListener("resize", render);
