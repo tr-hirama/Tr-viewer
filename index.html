@@ -18,7 +18,9 @@
     background: #2d2d30;
     border-bottom: 1px solid #3f3f46;
   }
-  header h1 { font-size: 15px; margin: 0; font-weight: 600; white-space: nowrap; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; white-space: nowrap; line-height: 1.1; }
+  #titleBox { display: flex; flex-direction: column; }
+  #version { font-size: 10px; color: #7a7a7a; }
   #controls { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
   #controls.hidden { display: none; }
   #controls label { font-size: 12px; color: #cfcfcf; display: flex; align-items: center; gap: 4px; cursor: pointer; }
@@ -113,7 +115,13 @@
 </head>
 <body>
   <header>
-    <h1>DXF / TRC ビューワー</h1>
+    <div id="titleBox">
+      <div id="titleBox">
+      <h1>DXF / TRC ビューワー</h1>
+      <span id="version">v1.0.0</span>
+    </div>
+      <span id="version">v1.0.0</span>
+    </div>
     <label id="fileLabel">ファイルを開く
       <input id="fileInput" type="file" accept=".dxf,.trc" hidden>
     </label>
