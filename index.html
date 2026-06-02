@@ -49,6 +49,20 @@
   #saveBtn:hover { background: #469152; }
   #saveBtn.hidden { display: none; }
 
+  #levelXlsxBtn {
+    font-size: 12px;
+    background: #1f7a6e;
+    color: #fff;
+    border: none;
+    padding: 5px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    white-space: nowrap;
+    font-family: inherit;
+  }
+  #levelXlsxBtn:hover { background: #259384; }
+  #levelXlsxBtn.hidden { display: none; }
+
   #main { display: flex; flex: 1 1 auto; min-height: 0; }
   #stage { position: relative; flex: 2 1 0; min-width: 0; overflow: hidden; }
   #splitter { flex: 0 0 6px; background: #3f3f46; cursor: col-resize; }
@@ -76,15 +90,15 @@
 
   #hud {
     position: absolute; left: 12px; bottom: 10px;
-    font-size: 11px; color: #888;
-    background: rgba(0,0,0,0.4);
+    font-size: 11px; color: #e6e6e6;
+    background: rgba(0,0,0,0.72);
     padding: 4px 8px; border-radius: 4px;
     pointer-events: none;
   }
   #coord {
     position: absolute; right: 12px; bottom: 10px;
-    font-size: 11px; color: #9ad; font-variant-numeric: tabular-nums;
-    background: rgba(0,0,0,0.4);
+    font-size: 11px; color: #bfe0ff; font-variant-numeric: tabular-nums;
+    background: rgba(0,0,0,0.72);
     padding: 4px 8px; border-radius: 4px;
     pointer-events: none;
   }
@@ -144,8 +158,20 @@
   #panel td.plus { color: #7fd17f; }
   #panel td.minus { color: #f08a8a; }
   #panel td.err { background: #5a1f1f; color: #ffb3b3; font-weight: bold; }
+  #panel td.mk-ok   { background: #16384a; color: #9fd6ff; }
+  #panel td.mk-warn { background: #4a3c10; color: #ffd866; }
+  #panel td.mk-ng   { background: #5a1f1f; color: #ffb3b3; font-weight: bold; }
+  #panel .note .mk-ok   { color: #9fd6ff; }
+  #panel .note .mk-warn { color: #ffd866; }
+  #panel .note .mk-ng   { color: #ffb3b3; }
   #panel .empty { color: #777; }
   #panel .note { color: #888; margin: 4px 0 0; font-size: 11px; }
+  #panel pre.raw {
+    margin: 0; padding: 8px; background: #1a1a1d; border: 1px solid #333337;
+    border-radius: 4px; color: #d4d4d4; font-size: 11px; line-height: 1.45;
+    white-space: pre; overflow: auto; max-height: calc(100vh - 160px);
+    font-family: "Consolas", "Courier New", monospace;
+  }
 </style>
 </head>
 <body>
@@ -158,6 +184,7 @@
       <input id="fileInput" type="file" accept=".dxf,.trc" hidden>
     </label>
     <button id="saveBtn" class="hidden" title="表示中の図面を DXF (R12) で保存">DXF保存</button>
+    <button id="levelXlsxBtn" class="hidden" title="レベル（水準）データを雛形 Excel (.xlsm) に差し込んで出力">レベルExcel</button>
     <button id="viewToggle" class="hidden" title="図面とデータを切り替え">📋 データ</button>
     <div id="controls" class="hidden">
       <label><input type="checkbox" id="chkLine" checked> 線</label>
@@ -347,8 +374,17 @@ function extractZipEntry(buf, wantName) {
 }
 
 function decodeSjis(u8) {
-  try { return new TextDecoder("shift_jis", { fatal: false }).decode(u8); }
-  catch (e) { return new TextDecoder("utf-8", { fatal: false }).decode(u8); }
+  // UTF-8 BOM があれば UTF-8 確定
+  if (u8.length >= 3 && u8[0] === 0xEF && u8[1] === 0xBB && u8[2] === 0xBF) {
+    return new TextDecoder("utf-8", { fatal: false }).decode(u8);
+  }
+  // 厳密 UTF-8 として解釈できれば UTF-8、不正バイト列なら Shift_JIS とみなす。
+  // (ASCII のみのファイルは両者同一なので影響なし)
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(u8);
+  } catch (e) {
+    return new TextDecoder("shift_jis", { fatal: false }).decode(u8);
+  }
 }
 
 // ArrayBuffer -> TrDATA テキスト (ZIP / 平文の両対応)
@@ -392,7 +428,8 @@ function parseTrc(text) {
   const trc = {
     points: [], lines: [], circles: [], mojis: [],
     hedges: [], plines: [], blocks: new Map(), inserts: [],
-    levels: [], surveyData: []
+    levels: [], surveyData: [], surveyRaw: [],
+    mawariken: [], keisantenFlg: false, comments: [], overview: {}
   };
   let section = null;
   let inBlockPts = false, inPlinePts = false;
@@ -419,6 +456,8 @@ function parseTrc(text) {
       if (line === "*DATA -SECTION") { inDataSec = true; continue; }
       if (line === "*END-SECTION") { inDataSec = false; continue; }
       if (line[0] === "*" || line[0] === "#") continue; // *BASE -SECTION や *** コメント
+      // 野帳が O1K/O2K 形式 (行頭 A/B/C/D/E/F/Z…) の場合に備え生行を保持
+      trc.surveyRaw.push(line);
       if (!inDataSec) continue;
       const f = splitCsv(line);
       if (f.length < 8) continue;
@@ -441,7 +480,8 @@ function parseTrc(text) {
         trc.points.push({ name: f[0], x: num(f[1]), y: num(f[2]),
                           notDisp: parseInt(f[3], 10) || 0,
                           sketch: parseInt(f[4], 10) || 0,
-                          del: parseInt(f[5], 10) || 0 });
+                          del: parseInt(f[5], 10) || 0,
+                          yoten: parseInt(f[6], 10) || 0 });
         break;
       case "*Line-Section*":
         // Name(0),Layer(1),pnA(2),pnB(3),delFLG(4),SketchFLG(5),Style(6)
@@ -456,6 +496,7 @@ function parseTrc(text) {
                            fill: parseInt(f[5], 10) || 0,
                            del: parseInt(f[6], 10) || 0,
                            sketch: parseInt(f[7], 10) || 0,
+                           pointName: (f[8] || "").trim(),
                            photo: parseInt(f[9], 10) || 0 });
         break;
       case "*Moji-Section*":
@@ -493,11 +534,106 @@ function parseTrc(text) {
         if (inBlockPts) { if (curBlock) curBlock.pts.push({ x: num(f[0]), y: num(f[1]) }); }
         else { curBlock = { name: f[0], pts: [] }; trc.blocks.set(f[0], curBlock); }
         break;
+      case "*Mawariken-Section*":
+        // KeisantenFlg,フラグ / または 境界(0),まわりけん入力(1),計算値(2),測定不能(3)
+        if (f[0] === "KeisantenFlg") { trc.keisantenFlg = (f[1] || "").trim() === "1"; }
+        else if (f.length >= 2) {
+          const input = (f[1] || "").trim();
+          const unable = f.length >= 4 ? /true/i.test(f[3] || "") : (input === "");
+          trc.mawariken.push({ kyokai: (f[0] || "").trim(), input, unable });
+        }
+        break;
+      case "*Comment-Section*":
+        // SortNum(0),Check(1),全文(2),改行入りテキスト(3, |区切り),順序(4)
+        if (f.length >= 4) {
+          trc.comments.push({ sort: parseInt(f[0], 10) || 0, check: /true/i.test(f[1] || ""),
+                              text: (f[3] || f[2] || "") });
+        }
+        break;
+      case "*Overview-Section*": {
+        // 1行目: 案件番号(0),担当ｱｶｳﾝﾄ(1),担当氏名(2),Ver(3),日付(4),営業所(5),邸名(6),住所(7),緯度(8),経度(9)
+        // 2行目: ,PC名(1),保存日時(2)
+        const o = trc.overview;
+        const v = (s) => (s == null ? "" : String(s)).trim();
+        if (f.length >= 8) {
+          o.caseNo = v(f[0]); o.account = v(f[1]); o.name = v(f[2]); o.version = v(f[3]);
+          o.date = v(f[4]); o.office = v(f[5]); o.teiName = v(f[6]); o.address = v(f[7]);
+          o.lat = v(f[8]); o.lng = v(f[9]);
+        } else if (v(f[0]) === "" && f.length >= 3) {
+          o.pc = v(f[1]); o.savedAt = v(f[2]);
+        }
+        break;
+      }
     }
+  }
+
+  // *DATA -SECTION 形式で測角データが取れなかった場合、O1K/O2K 野帳形式を解釈する
+  if (trc.surveyData.length === 0 && trc.surveyRaw.length) {
+    trc.surveyData = parseSurveyO1kO2k(trc.surveyRaw);
   }
 
   trc.pointMap = new Map(trc.points.map(p => [p.name, p]));
   return trc;
+}
+
+// O1K / O2K 野帳形式 (MAGNET Field 等) の測角データを解釈する。
+// cad-trcad frmTrCAD.AddDataTable_O1kO2k を移植。
+//   D,<器械点>,...            器械点設定
+//   F,<点名>,, ,<符号>,<水平角DDD.MMSS>,<鉛直角>,<斜距離>,…,<水平距離(13)>,<水平距離(14)>,…
+//   各器械点で最初の F は後視点、以降の F が観測 (測点) 行。
+//   O1K は距離が item[13]、O2K は item[14]。
+function parseSurveyO1kO2k(lines) {
+  const rows = [];
+  const dec = (s) => {                       // VB CDec(...).ToString 相当 (数値なら桁揃え無しの数値文字列)
+    s = (s == null ? "" : String(s)).trim();
+    return (s !== "" && !isNaN(Number(s))) ? String(Number(s)) : s;
+  };
+  let ipTen = "", bsTen = "";
+  let flgRead = false, flgReadO1k1st = false;
+
+  for (const txt of lines) {
+    const lst = txt.split(",");
+    const code = (lst[0] || "").trim();
+    if (code === "Z") {
+      flgRead = false; flgReadO1k1st = false;
+    } else if (code === "D") {
+      flgRead = false;
+      ipTen = (lst[1] || "").trim();
+    } else if (code === "F") {
+      if (!flgRead) bsTen = (lst[1] || "").trim();
+
+      // O1K: item[13] に距離があり、まだ初回観測を読んでいない場合
+      if ((lst[13] || "") !== "" && !flgReadO1k1st) {
+        flgRead = true;
+        bsTen = "N";
+      }
+
+      if (!flgRead) {
+        flgRead = true;            // この F は後視点 → 行を作らずスキップ
+      } else {
+        if ((lst[13] || "") !== "") flgReadO1k1st = true;
+
+        const sokuTen = (lst[1] || "").trim();
+
+        // 水平角 DDD.MMSS
+        const ang = lst[5] || "";
+        const doo  = dec(ang.substr(0, 3));
+        const fun  = dec(ang.substr(4, 2));
+        const byou = dec(ang.substr(6, 2));
+
+        // 水平距離 (O1K=13 / O2K=14)
+        let dist = (lst[13] || "");
+        if (dist === "") dist = (lst[14] || "");
+        if (dist.trim() !== "" && !isNaN(Number(dist))) dist = Number(dist).toFixed(3);
+
+        rows.push({ ip: ipTen, bs: bsTen, sokuten: sokuTen,
+                    sui: doo, hei: fun, kaku: byou, dist, err: "" });
+
+        ipTen = ""; bsTen = "";
+      }
+    }
+  }
+  return rows;
 }
 
 // ===========================================================================
@@ -546,7 +682,8 @@ function computeLevels(levels) {
     }
 
     if (NM !== "" && gh != null) fixed.push({ name: NM, gh });
-    return { name: l.name, bs: l.bs, fs: l.fs, tp: l.tp, remarks: l.remarks, gh, ck, ckError };
+    // 器械高(IH) = 基準高 + 後視 (mm)。trcad レベルExcel の D 列に相当。
+    return { name: l.name, bs: l.bs, fs: l.fs, tp: l.tp, remarks: l.remarks, gh, ck, ckError, ih: levelGH + levelBS };
   });
 }
 
@@ -565,12 +702,14 @@ const chkLabel = document.getElementById("chkLabel");
 const chkMoji = document.getElementById("chkMoji");
 const chkFrame = document.getElementById("chkFrame");
 const saveBtn = document.getElementById("saveBtn");
+const levelXlsxBtn = document.getElementById("levelXlsxBtn");
 const viewToggle = document.getElementById("viewToggle");
 
 let mode = null;          // "dxf" | "trc"
 let currentName = "";     // 読み込み中ファイル名
 let entities = [];        // DXF
 let trc = null;           // TRC
+let trcRawText = "";      // TRC 生テキスト
 let view = { scale: 1, ox: 0, oy: 0 };
 let hasData = false;
 
@@ -945,14 +1084,60 @@ function shapeHtml() {
     + `<tr><td class="l">ポリライン</td><td>${trc.plines.length}</td></tr></table>`;
 }
 
+function rawTextHtml() {
+  if (!trcRawText) return '<div class="empty">データなし</div>';
+  return `<pre class="raw">${esc(trcRawText)}</pre>`;
+}
+
+// 与点チェック — cad-trcad frmTrCAD.YotenCalc / GetList_YotenCheck を移植。
+//   既知点を再観測する際は 点番=元番号+300 で付与（例 K1→K301）。
+//   与点(数値部>300 かつ 英字+(数値-300) が存在)と基準点の距離を求める。
+//   点番が "_" で始まるものは対象外。Map(与点名 → 距離m) を返す。
+const SURVEY_YOTEN_LIMIT = 0.02; // 20mm = 2cm (frmTrCAD._YotenDistThreshold)
+
+function computeYotenCheck() {
+  const map = new Map();
+  const pm = trc.pointMap || new Map();
+  for (const p of trc.points) {
+    const nm = p.name || "";
+    if (nm.charAt(0) === "_") continue;
+    const abc = nm.replace(/[0-9]/g, "");
+    const numStr = nm.replace(/[^0-9]/g, "");
+    if (numStr === "") continue;
+    let num = parseInt(numStr, 10);
+    if (!(num > 300)) continue;
+    let ref = null;
+    while (num - 300 > 0) {              // 300 を繰り返し引くケースも考慮
+      const rp = pm.get(abc + (num - 300));
+      if (rp) ref = rp;
+      num -= 300;
+    }
+    if (ref) map.set(nm, Math.hypot(ref.x - p.x, ref.y - p.y));
+  }
+  return map;
+}
+
 function surveyHtml() {
   if (!trc.surveyData.length) return '<div class="empty">データなし</div>';
+  const yoten = computeYotenCheck();
+  let overCount = 0;
   let html = "<table><tr><th>器械点</th><th>後視点</th><th>測点</th><th>水</th><th>平</th><th>角</th><th>距離</th><th>誤差</th></tr>";
   for (const s of trc.surveyData) {
+    let errCell = `<td>${esc(s.err)}</td>`;
+    const d = yoten.get(s.sokuten);
+    if (d != null) {
+      const over = d >= SURVEY_YOTEN_LIMIT;
+      if (over) overCount++;
+      errCell = `<td class="${over ? "err" : ""}">${d.toFixed(3)}</td>`;
+    }
     html += `<tr><td class="l">${esc(s.ip)}</td><td class="l">${esc(s.bs)}</td><td class="l">${esc(s.sokuten)}</td>`
-          + `<td>${esc(s.sui)}</td><td>${esc(s.hei)}</td><td>${esc(s.kaku)}</td><td>${esc(s.dist)}</td><td>${esc(s.err)}</td></tr>`;
+          + `<td>${esc(s.sui)}</td><td>${esc(s.hei)}</td><td>${esc(s.kaku)}</td><td>${esc(s.dist)}</td>${errCell}</tr>`;
   }
-  return html + "</table>";
+  html += "</table>";
+  html += `<p class="note">誤差=与点チェック（点番+300 で再観測した既知点と元点の距離 m）。`
+        + `|誤差| ≧ ${SURVEY_YOTEN_LIMIT * 1000}mm で許容超過（赤）。</p>`;
+  if (overCount > 0) html += `<p class="note" style="color:#f08a8a">⚠ 与点の許容超過が ${overCount} 件あります。</p>`;
+  return html;
 }
 
 function levelHtml() {
@@ -985,6 +1170,101 @@ function levelHtml() {
   return html;
 }
 
+// ===========================================================================
+// 概要 — *Overview-Section* の案件メタ情報を表示
+// ===========================================================================
+function overviewHtml() {
+  const o = trc.overview || {};
+  const rows = [
+    ["概要コード", o.caseNo],
+    ["日付", o.date],
+    ["邸名", o.teiName],
+    ["住所", o.address],
+    ["経度・緯度", (o.lat || o.lng)
+      ? `${esc(o.lng)}, ${esc(o.lat)} <a href="https://www.google.com/maps?q=${encodeURIComponent((o.lat || "") + "," + (o.lng || ""))}" target="_blank" rel="noopener">地図</a>`
+      : "", true],
+    ["依頼会社", o.office],
+  ];
+  const has = rows.some(r => (r[1] != null && String(r[1]).trim() !== ""));
+  if (!has) return '<div class="empty">概要データなし</div>';
+  let html = "<table>";
+  for (const [k, val, raw] of rows) {
+    const v = (val == null ? "" : String(val));
+    html += `<tr><td class="l">${esc(k)}</td><td class="l">${raw ? v : esc(v)}</td></tr>`;
+  }
+  html += "</table>";
+  return html;
+}
+
+// ===========================================================================
+// まわりけん（境界一覧）— cad-trcad frmTrCAD.ShowData_dgvMawarikenCheck を移植
+//   境界点 K<n>(n≤300) を K1→K2…→Kmax→K1 と連結し、計算値=隣接間距離(m)。
+//   入力値は *Mawariken-Section* から取得。誤差=|入力-計算|×1000(mm)。
+//   判定: ≦20mm 〇 / ≦50mm △ / >50mm × / 入力空 未判定 / 数値でない・計算不可 −
+// ===========================================================================
+function mawarikenHtml() {
+  // 境界点 K<n> (n≤300) を収集
+  const kpts = new Map();
+  let kMax = 0;
+  for (const p of trc.points) {
+    const mm = /^K(\d+)$/.exec(p.name || "");
+    if (!mm) continue;
+    const n = parseInt(mm[1], 10);
+    if (n > 300) continue;
+    kpts.set(n, p);
+    if (n > kMax) kMax = n;
+  }
+  if (kMax < 2) return '<div class="empty">境界点（K1, K2 …）がありません</div>';
+
+  const dist = (a, b) => Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2);
+  const inputMap = new Map(trc.mawariken.map(m => [m.kyokai, m]));
+
+  // 行リストを構築（K1-K2 … Kmax-1-Kmax、kMax≧3 なら Kmax-K1 で閉合）
+  const rows = [];
+  for (let k = 1; k <= kMax - 1; k++) {
+    rows.push({ start: "K" + k, end: "K" + (k + 1), sp: kpts.get(k), ep: kpts.get(k + 1) });
+    if (k === kMax - 1 && kMax >= 3) {
+      rows.push({ start: "K" + kMax, end: "K1", sp: kpts.get(kMax), ep: kpts.get(1) });
+    }
+  }
+
+  let ngCount = 0;
+  let html = "<table><tr><th>境界</th><th>計算値</th><th>まわりけん</th><th>誤差(m)</th><th>不能</th></tr>";
+  for (const r of rows) {
+    const kyokai = r.start + " - " + r.end;
+    const calcStr = (r.sp && r.ep) ? dist(r.sp, r.ep).toFixed(3) : "";
+    const mk = inputMap.get(kyokai) || inputMap.get(r.start + " - " + r.end);
+    const input = mk ? (mk.input || "") : "";
+    const unable = mk ? mk.unable : false;
+
+    // 判定・誤差（trcad GetMawarikenGosa / GetMawarikenHantei）
+    let gosaCell = '<td class="empty"></td>';
+    if (unable) {
+      gosaCell = '<td class="mk-ng">不可</td>';
+    } else if (input.trim() === "") {
+      gosaCell = '<td class="empty"></td>'; // 未判定
+    } else if (isNaN(Number(input)) || calcStr === "") {
+      gosaCell = '<td class="mk-ng">－</td>'; ngCount++;
+    } else {
+      const keisan = Number(calcStr);
+      const gosaMm = Math.abs(Number(input) - keisan) * 1000;
+      const gosaInt = Math.round(gosaMm);
+      if (gosaMm <= 20) gosaCell = `<td class="mk-ok">${(gosaInt / 1000).toFixed(3)}</td>`;
+      else if (gosaMm <= 50) gosaCell = `<td class="mk-warn">${(gosaInt / 1000).toFixed(3)}</td>`;
+      else { gosaCell = '<td class="mk-ng">Over</td>'; ngCount++; }
+    }
+
+    html += `<tr><td class="l">${esc(kyokai)}</td><td>${esc(calcStr)}</td>`
+          + `<td>${esc(input)}</td>${gosaCell}<td>${unable ? "✓" : ""}</td></tr>`;
+  }
+  html += "</table>";
+  html += '<p class="note">計算値=隣接境界点間の距離(m)。誤差=|まわりけん入力−計算値|。'
+        + '<span class="mk-ok">〇≦20mm</span> / <span class="mk-warn">△≦50mm</span> / '
+        + '<span class="mk-ng">×&gt;50mm・判定不可</span>。</p>';
+  if (ngCount > 0) html += `<p class="note" style="color:#f08a8a">⚠ 許容超過・判定不可が ${ngCount} 件あります。</p>`;
+  return html;
+}
+
 function renderPanel() {
   if (!mode) { panel.innerHTML = ""; return; }
 
@@ -1001,17 +1281,23 @@ function renderPanel() {
 
   // TRC: 図形 / 測角データ / レベル（水準）を別タブ（別画面）に分離
   const tabs = [
-    { key: "shape",  label: "図形" },
+    { key: "overview", label: "概要" },
+    { key: "mawari", label: "まわりけん" },
     { key: "survey", label: "測角データ" },
     { key: "level",  label: "レベル（水準）" },
+    { key: "raw",    label: "TRCデータ" },
+    { key: "shape",  label: "図形" },
   ];
   let html = '<div class="tabs">';
   for (const t of tabs) {
     html += `<button class="tab${activeTab === t.key ? " active" : ""}" data-tab="${t.key}">${t.label}</button>`;
   }
   html += "</div><div class=\"tabBody\">";
-  if (activeTab === "survey")      html += surveyHtml();
+  if (activeTab === "overview")    html += overviewHtml();
+  else if (activeTab === "survey") html += surveyHtml();
   else if (activeTab === "level")  html += levelHtml();
+  else if (activeTab === "mawari") html += mawarikenHtml();
+  else if (activeTab === "raw")    html += rawTextHtml();
   else                             html += shapeHtml();
   html += "</div>";
   panel.innerHTML = html;
@@ -1049,7 +1335,7 @@ function loadTrc(parsed, name) {
   trc = parsed;
   entities = [];
   controls.classList.remove("hidden");
-  activeTab = "shape";
+  activeTab = "overview";
   renderPanel();
   const dispPts = trc.points.filter(p => !p.notDisp).length;
   finishLoad(name, `点 ${dispPts} / 線 ${trc.lines.length} / 円 ${trc.circles.length} / 文字 ${trc.mojis.length}`);
@@ -1061,6 +1347,9 @@ function finishLoad(name, summary) {
   dropEl.classList.add("hidden");
   dropEl.classList.remove("empty");
   saveBtn.classList.remove("hidden");
+  // レベルExcel出力は TRC でレベルデータがある場合のみ
+  if (mode === "trc" && trc && trc.levels.length > 0) levelXlsxBtn.classList.remove("hidden");
+  else levelXlsxBtn.classList.add("hidden");
   viewToggle.classList.remove("hidden");
   mainEl.classList.remove("view-panel"); // 読込時はまず図面を全面表示 (スマホ)
   viewToggle.textContent = "📋 データ";
@@ -1078,6 +1367,7 @@ async function handleFile(file) {
     const buf = await file.arrayBuffer();
     if (ext === "trc") {
       const text = await readTrcText(buf);
+      trcRawText = text;
       loadTrc(parseTrc(text), file.name);
     } else {
       const text = decodeText(buf);
@@ -1093,121 +1383,244 @@ async function handleFile(file) {
 //   座標は (値 - 最小) * 1000 (m→mm)。レイヤー先頭文字 K→KYO-0/R→KYO/H→TATEMONO/他→COUI
 // ===========================================================================
 const DXF_SCALE = 1000;
+const DXF_BOUNDARY_RADIUS = 0.025; // _BoundaryDiameter(50) / 2000
+const DXF_SKETCH_SYMBOL = "_";     // _Project.SketchSymbol 既定
 
-const DXF_PREAMBLE = [
-  "0","SECTION","2","HEADER",
-  "9","$ACADVER","1","AC1009",
-  "9","$INSBASE","10","0.0","20","0.0","30","0.0",
-  "9","$PDMODE","70","3",
-  "9","$PDSIZE","40","250.0",
-  "0","ENDSEC",
-  "0","SECTION","2","TABLES",
-  "0","TABLE","2","LTYPE","70","3",
-  "0","LTYPE","2","CONTINUOUS","70","0","3","Solid line","72","65","73","0","40","0.0",
-  "0","LTYPE","2","DASHED","70","0","3","Dashed","72","65","73","2","40","0.75","49","0.5","49","-0.25",
-  "0","LTYPE","2","HIDDEN","70","0","3","Hidden","72","65","73","2","40","0.45","49","0.25","49","-0.2",
-  "0","ENDTAB",
-  "0","TABLE","2","LAYER","70","6",
-  "0","LAYER","2","0","70","0","62","7","6","CONTINUOUS",
-  "0","LAYER","2","KYO-0","70","0","62","4","6","CONTINUOUS",
-  "0","LAYER","2","KYO","70","0","62","4","6","CONTINUOUS",
-  "0","LAYER","2","TATEMONO","70","0","62","3","6","CONTINUOUS",
-  "0","LAYER","2","COUI","70","0","62","2","6","CONTINUOUS",
-  "0","LAYER","2","KYOMOJI","70","0","62","1","6","CONTINUOUS",
-  "0","ENDTAB",
-  "0","TABLE","2","STYLE","70","1",
-  "0","STYLE","2","STANDARD","70","0","40","0.0","41","1.0","50","0.0","71","0","42","2.5","3","txt","4","",
-  "0","ENDTAB",
-  "0","ENDSEC"
+// レイヤーコード(先頭1文字) → DXF画層 （cad-trcad frmTrCAD DXF出力の振り分けを移植）
+//   K=境界 S=スケッチ F=フリー R=道路 H=家屋 G=外構 I=隣接 Q=予備 L=レベル
+//   D=電柱 Z=更地 B=設備 T=既存家屋 M=家屋 Y=道路(L側溝) U=ブロック
+function dxfLineLayer(layer) {
+  switch ((layer || "").charAt(0)) {
+    case "D": return "DENCHU";
+    case "R": return "KYO";
+    case "H": return "TATEMONO";
+    case "T": return "SETUBI";
+    case "U": return "SETUBI2";
+    case "I": return "TATEMONO2";
+    case "G": return "COUI";
+    case "Q": return "COUZOU";
+    case "Y": return "KYO";
+    default:  return "COUI";
+  }
+}
+function dxfCircleLayer(layer) {
+  switch ((layer || "").charAt(0)) {
+    case "D": return "DENCHU";
+    case "T": case "B": return "SETUBI";
+    case "U": return "SETUBI2";
+    default:  return "COUI";
+  }
+}
+function dxfMojiLayer(layer) {
+  switch ((layer || "").charAt(0)) {
+    case "D": return "DENCHU";
+    case "K": return "KYO-0";
+    case "R": return "KYO";
+    case "H": return "TATEMONO";
+    case "Y": return "KYO";
+    case "B": return "SETUBI";
+    case "Z": return "COUZOU";
+    case "U": return "COUI";
+    case "T": return "TATEMONO";
+    case "M": return "TATEMONO2";
+    case "S": return "RED";
+    case "L": return "REBERU";
+    default:  return "COUI";
+  }
+}
+function dxfInsertLayer(layer) {
+  switch ((layer || "").charAt(0)) {
+    case "D": return "DENCHU";
+    case "K": return "KYO-0";
+    case "R": return "KYO";
+    case "H": return "TATEMONO";
+    case "T": return "SETUBI";
+    case "U": return "SETUBI2";
+    default:  return "COUI";
+  }
+}
+
+// DXF ヘッダ / テーブル （trcad の画層を網羅）
+const DXF_LAYER_TABLE = [
+  ["0","7"], ["DENCHU","6"], ["KYO-0","4"], ["KYO","4"], ["TATEMONO","3"],
+  ["TATEMONO2","3"], ["SETUBI","5"], ["SETUBI2","5"], ["COUI","2"], ["COUZOU","2"],
+  ["KYOMOJI","1"], ["RED","1"], ["REBERU","1"], ["UEKOMI","8"], ["TEXT","7"]
+];
+const DXF_LTYPE_TABLE = [
+  ["CONTINUOUS","Solid line",[]],
+  ["HIDDEN-2","Hidden",[0.45,-0.2]],
+  ["DASHED-2","Dashed",[0.5,-0.25]],
+  ["DASHED-4","Dashed long",[1.0,-0.5]],
 ];
 
-function dxfLayerOf(layer) {
-  const c = (layer || "").charAt(0).toUpperCase();
-  if (c === "K") return "KYO-0";
-  if (c === "R") return "KYO";
-  if (c === "H") return "TATEMONO";
-  return "COUI";
-}
-
-function buildDxf(body) {
-  const all = DXF_PREAMBLE.concat(
-    ["0","SECTION","2","ENTITIES"], body, ["0","ENDSEC","0","EOF"]
-  );
-  return all.join("\r\n") + "\r\n";
-}
-
-function pushPolyline(body, h, pts, layer, closed) {
-  body.push("0","POLYLINE","8",layer,"5",h(),"66","1","70",closed ? "1" : "0",
-            "10","0.0","20","0.0","30","0.0");
-  for (const v of pts) {
-    body.push("0","VERTEX","8",layer,"5",h(),"10",v.x,"20",v.y,"30","0.0");
+function dxfHeaderTables() {
+  const a = [
+    "0","SECTION","2","HEADER",
+    "9","$ACADVER","1","AC1009",
+    "9","$INSBASE","10","0.0","20","0.0","30","0.0",
+    "9","$PDMODE","70","3",
+    "9","$PDSIZE","40","250.0",
+    "0","ENDSEC",
+    "0","SECTION","2","TABLES",
+    "0","TABLE","2","LTYPE","70",String(DXF_LTYPE_TABLE.length),
+  ];
+  for (const [nm, desc, pat] of DXF_LTYPE_TABLE) {
+    a.push("0","LTYPE","2",nm,"70","0","3",desc,"72","65","73",String(pat.length),
+           "40",String(pat.reduce((s, v) => s + Math.abs(v), 0).toFixed(3)));
+    for (const v of pat) a.push("49",String(v));
   }
-  body.push("0","SEQEND","8",layer,"5",h());
+  a.push("0","ENDTAB","0","TABLE","2","LAYER","70",String(DXF_LAYER_TABLE.length));
+  for (const [nm, col] of DXF_LAYER_TABLE) {
+    a.push("0","LAYER","2",nm,"70","0","62",col,"6","CONTINUOUS");
+  }
+  a.push("0","ENDTAB",
+    "0","TABLE","2","STYLE","70","2",
+    "0","STYLE","2","STANDARD","70","0","40","0.0","41","1.0","50","0.0","71","0","42","2.5","3","txt","4","",
+    "0","STYLE","2","MSPGothic","70","0","40","0.0","41","1.0","50","0.0","71","0","42","2.5","3","msgothic.ttc","4","",
+    "0","ENDTAB","0","ENDSEC");
+  return a;
 }
 
 function trcToDxf(trc) {
+  // 座標基準: 表示点 + 非削除線の端点 から最小値-3 （cad-trcad と同じ）
   let minX = Infinity, minY = Infinity;
   const ext = (x, y) => { if (x < minX) minX = x; if (y < minY) minY = y; };
-  for (const p of trc.points) ext(p.x, p.y);
-  for (const c of trc.circles) ext(c.x - c.r, c.y - c.r);
-  for (const m of trc.mojis) ext(m.x, m.y);
-  for (const hd of trc.hedges) { ext(hd.x1, hd.y1); ext(hd.x2, hd.y2); }
-  for (const pl of trc.plines) for (const v of pl.pts) ext(v.x, v.y);
-  for (const ins of trc.inserts) {
-    const blk = trc.blocks.get(ins.block);
-    if (blk) for (const v of blk.pts) ext(v.x + ins.x, v.y + ins.y);
-  }
-  if (!isFinite(minX)) { minX = 0; minY = 0; }
-  const X = (x) => ((x - minX) * DXF_SCALE).toFixed(3);
-  const Y = (y) => ((y - minY) * DXF_SCALE).toFixed(3);
-
-  let cnt = 256;
-  const h = () => (cnt++).toString(16).toUpperCase();
-  const body = [];
-
-  for (const p of trc.points) {
-    if (p.notDisp) continue;
-    body.push("0","POINT","8","0","5",h(),"10",X(p.x),"20",Y(p.y),"30","0.0");
-    if (p.name) {
-      body.push("0","TEXT","8","0","5",h(),
-        "10",((p.x - minX) * DXF_SCALE - (150 + 250 * (p.name.length - 1))).toFixed(3),
-        "20",((p.y - minY) * DXF_SCALE + 300).toFixed(3),"30","0.0",
-        "40","500.0","1",p.name,"7","STANDARD");
-    }
-  }
+  for (const p of trc.points) if (!p.notDisp) ext(p.x, p.y);
   for (const ln of trc.lines) {
     if (ln.del) continue;
     const a = trc.pointMap.get(ln.pnA), b = trc.pointMap.get(ln.pnB);
+    if (a) ext(a.x, a.y); if (b) ext(b.x, b.y);
+  }
+  if (!isFinite(minX)) { minX = 3; minY = 3; }
+  minX -= 3; minY -= 3;
+  const X = (x) => ((x - minX) * DXF_SCALE).toFixed(3);
+  const Y = (y) => ((y - minY) * DXF_SCALE).toFixed(3);
+
+  const ent = [];
+  const blocks = []; // BLOCKS セクション用 {name, lines:[[x1,y1,x2,y2]]}
+
+  // 点（＋点名 TEXT）
+  for (const p of trc.points) {
+    if ((p.notDisp || p.sketch) && !p.yoten) continue;
+    if (!p.name) continue;
+    if (p.name.charAt(0).toUpperCase() === DXF_SKETCH_SYMBOL) continue;
+    ent.push("0","POINT","8","0","10",X(p.x),"20",Y(p.y),"30","0.0");
+    ent.push("0","TEXT","8","0",
+      "10",((p.x - minX) * DXF_SCALE - (150 + 250 * (p.name.length - 1))).toFixed(3),
+      "20",((p.y - minY) * DXF_SCALE + 300).toFixed(3),"30","0.0",
+      "40","500.0","1",p.name,"7","Standard");
+  }
+
+  // 線（境界K/スケッチS/レベルL は出力しない）
+  for (const ln of trc.lines) {
+    if (ln.del || ln.sketch) continue;
+    const c0 = (ln.layer || "").charAt(0);
+    if (c0 === "S" || c0 === "K" || c0 === "L") continue;
+    const a = trc.pointMap.get(ln.pnA), b = trc.pointMap.get(ln.pnB);
     if (!a || !b) continue;
-    body.push("0","LINE","8",dxfLayerOf(ln.layer),"5",h());
-    if (ln.style === 2) body.push("6","DASHED");
-    body.push("10",X(a.x),"20",Y(a.y),"30","0.0","11",X(b.x),"21",Y(b.y),"31","0.0");
+    ent.push("0","LINE","8",dxfLineLayer(ln.layer));
+    if (ln.style === 1) ent.push("6","HIDDEN-2");
+    else if (ln.style === 2) ent.push("6","DASHED-2");
+    else if (ln.style === 3) ent.push("6","DASHED-4");
+    ent.push("10",X(a.x),"20",Y(a.y),"30","0.0","11",X(b.x),"21",Y(b.y),"31","0.0");
   }
+
+  // 円（境界K・スケッチ除外。境界点の塗り●は LWPOLYLINE）
   for (const c of trc.circles) {
-    if (c.del) continue;
-    body.push("0","CIRCLE","8",dxfLayerOf(c.layer),"5",h(),
-      "10",X(c.x),"20",Y(c.y),"30","0.0","40",(c.r * DXF_SCALE).toFixed(3));
+    if (c.del || c.sketch) continue;
+    const c0 = (c.layer || "").charAt(0);
+    if (c0 === "S" || c0 === "K") continue;
+    if (Math.abs(c.r - DXF_BOUNDARY_RADIUS) < 1e-6 && c.fill === 1) {
+      const cx = (c.x - minX) * DXF_SCALE, cy = (c.y - minY) * DXF_SCALE;
+      const lay = (c.pointName || "").charAt(0).toUpperCase() === "K" ? "KYOMOJI" : "KYO";
+      ent.push("0","LWPOLYLINE","8",lay,"90","2","70","1","43","75.0",
+        "10",(cx - 37.5).toFixed(3),"20",cy.toFixed(3),"42","1.0",
+        "10",(cx + 37.5).toFixed(3),"20",cy.toFixed(3),"42","1.0");
+    } else {
+      ent.push("0","CIRCLE","8",dxfCircleLayer(c.layer),
+        "10",X(c.x),"20",Y(c.y),"30","0.0","40",(c.r * DXF_SCALE).toFixed(3));
+    }
   }
+
+  // 文字（スケッチS・レベルL 除外。空文字も trcad は出力する）
   for (const m of trc.mojis) {
-    if (m.del || !m.text) continue;
-    body.push("0","TEXT","8","0","5",h(),"10",X(m.x),"20",Y(m.y),"30","0.0",
-      "40","200.0","1",m.text,"7","STANDARD");
-    if (m.angle) body.push("50",(360 - m.angle).toString());
+    if (m.del || m.sketch) continue;
+    const c0 = (m.layer || "").charAt(0);
+    if (c0 === "S" || c0 === "L") continue;
+    if (m.text == null) m.text = "";
+    const lay = dxfMojiLayer(m.layer);
+    const rows = String(m.text).split(/\r?\n/);
+    if (rows.length > 1) {
+      // 複数行: 1行ずつ TEXT（座標は近似。GDI実測に依存する部分は再現不可）
+      const LS = 265;
+      rows.forEach((row, i) => {
+        ent.push("0","TEXT","8",lay,
+          "10",X(m.x),"20",((m.y - minY) * DXF_SCALE + (rows.length * LS) / 2 - i * LS - 185).toFixed(3),
+          "30","0.0","40","200.0","1",row.trim(),"72","0","7","MSPGothic");
+      });
+    } else {
+      ent.push("0","TEXT","8",lay,
+        "10",X(m.x),"20",Y(m.y),"30","0.0","40","200.0","1",m.text);
+      if (m.angle) ent.push("50",String(360 - m.angle));
+      ent.push("72","4","11",X(m.x),"21",Y(m.y),"7","MSPGothic");
+    }
   }
-  for (const hd of trc.hedges) {
-    body.push("0","LINE","8","TATEMONO","5",h(),
-      "10",X(hd.x1),"20",Y(hd.y1),"30","0.0","11",X(hd.x2),"21",Y(hd.y2),"31","0.0");
-  }
-  for (const pl of trc.plines) {
-    if (pl.pts.length < 2) continue;
-    pushPolyline(body, h, pl.pts.map(v => ({ x: X(v.x), y: Y(v.y) })), "COUI", false);
-  }
+
+  // インサート（ブロック参照）
   for (const ins of trc.inserts) {
+    if (ins.del || ins.sketch) continue;
     const blk = trc.blocks.get(ins.block);
-    if (!blk || blk.pts.length < 2) continue;
-    pushPolyline(body, h, blk.pts.map(v => ({ x: X(v.x + ins.x), y: Y(v.y + ins.y) })), "0", false);
+    if (!blk || blk.pts.length === 0) continue;
+    const bname = ins.block === "Uekomi" ? "KABU1" : ins.block;
+    ent.push("0","INSERT","8",dxfInsertLayer(ins.layer),"2",bname,
+      "10",X(ins.x),"20",Y(ins.y),"30","0.0");
+    if (ins.angle) ent.push("50",String(-ins.angle));
   }
-  return buildDxf(body);
+
+  // ポリライン → ブロック定義＋INSERT （cad-trcad と同じ構造）
+  for (const pl of trc.plines) {
+    if (pl.del || pl.pts.length < 2) continue;
+    if ((pl.name || "").indexOf("PMADO") === 0) continue;
+    const lines = [];
+    for (let i = 1; i < pl.pts.length; i++) {
+      const a = pl.pts[i - 1], b = pl.pts[i];
+      lines.push([((a.x - minX) * DXF_SCALE).toFixed(3), ((a.y - minY) * DXF_SCALE).toFixed(3),
+                  ((b.x - minX) * DXF_SCALE).toFixed(3), ((b.y - minY) * DXF_SCALE).toFixed(3)]);
+    }
+    blocks.push({ name: pl.name, lines });
+    ent.push("0","INSERT","8","0","2",pl.name,"10","0.0","20","0.0","30","0.0");
+  }
+
+  // コメント → MTEXT （Check=True を SortNum 順。位置は近似）
+  const comments = trc.comments.filter(c => c.check).sort((a, b) => a.sort - b.sort);
+  if (comments.length) {
+    let maxX = -Infinity, maxY = -Infinity;
+    for (const p of trc.points) if (!p.notDisp) { if (p.x > maxX) maxX = p.x; if (p.y > maxY) maxY = p.y; }
+    if (!isFinite(maxX)) { maxX = minX; maxY = minY; }
+    let posY = (maxY - minY) * DXF_SCALE;
+    const posX = (maxX - minX) * DXF_SCALE + 3000;
+    for (const c of comments) {
+      const mtext = String(c.text).replace(/\|/g, "\\P");
+      ent.push("0","MTEXT","8","TEXT","10",posX.toFixed(3),"20",posY.toFixed(3),"30","0.0",
+        "40","250.0","1",mtext);
+      posY -= (String(c.text).split("|").length * 250 + 800);
+    }
+  }
+
+  // 組み立て: HEADER/TABLES + BLOCKS + ENTITIES + EOF
+  const out = dxfHeaderTables();
+  out.push("0","SECTION","2","BLOCKS");
+  for (const blk of blocks) {
+    out.push("0","BLOCK","8","0","2",blk.name,"70","0","10","0.0","20","0.0","30","0.0","3",blk.name);
+    for (const [x1, y1, x2, y2] of blk.lines) {
+      out.push("0","LINE","8","0","10",x1,"20",y1,"30","0.0","11",x2,"21",y2,"31","0.0");
+    }
+    out.push("0","ENDBLK","8","0");
+  }
+  out.push("0","ENDSEC","0","SECTION","2","ENTITIES");
+  out.push(...ent);
+  out.push("0","ENDSEC","0","EOF");
+  return out.join("\r\n") + "\r\n";
 }
 
 function entitiesToDxf(entities) {
@@ -1247,21 +1660,237 @@ function entitiesToDxf(entities) {
         break;
     }
   }
-  return buildDxf(body);
+  const out = dxfHeaderTables();
+  out.push("0","SECTION","2","ENTITIES");
+  out.push(...body);
+  out.push("0","ENDSEC","0","EOF");
+  return out.join("\r\n") + "\r\n";
 }
 
-function saveDxf() {
+// ===========================================================================
+// DXF 出力 (AC1015 / AutoCAD 2000) — cad-trcad の DXF 出力に構造まで合わせる版
+//   雛形 dxf-template.txt (HEADER/CLASSES/TABLES/BLOCKS/OBJECTS) を読み込み、
+//   ハンドル・サブクラスマーカー付きでエンティティを差し込む。
+//   座標は (値-最小)*1000。小数は toPrecision(15) で TRC が保持する精度に合わせる
+//   (trcad の .NET Decimal 内部精度の末尾桁は TRC に情報が無いため再現不可)。
+// ===========================================================================
+let _dxfTemplate = null;
+async function loadDxfTemplate() {
+  if (_dxfTemplate) return _dxfTemplate;
+  const res = await fetch("dxf-template.txt");
+  if (!res.ok) throw new Error("dxf-template.txt 読込失敗 (HTTP " + res.status + ")");
+  const txt = await res.text();
+  const T = {};
+  const parts = txt.split(/@@@([A-Z0-9]+)@@@\r?\n/);
+  for (let i = 1; i < parts.length; i += 2) T[parts[i]] = parts[i + 1];
+  _dxfTemplate = T;
+  return T;
+}
+
+// (値) を有効15桁に丸めた数値文字列に（double ノイズ桁を除去し trcad 前方桁に一致）
+function dxfNum(v) {
+  if (!isFinite(v)) return "0";
+  const n = Number(v.toPrecision(15));
+  return Object.is(n, -0) ? "0" : String(n);
+}
+
+async function trcToDxfFull(trc) {
+  const T = await loadDxfTemplate();
+
+  // 座標基準: 表示点 + 非削除線の端点 の最小値 - 3
+  let minX = Infinity, minY = Infinity;
+  for (const p of trc.points) if (!p.notDisp) { if (p.x < minX) minX = p.x; if (p.y < minY) minY = p.y; }
+  for (const ln of trc.lines) {
+    if (ln.del) continue;
+    const a = trc.pointMap.get(ln.pnA), b = trc.pointMap.get(ln.pnB);
+    if (a) { if (a.x < minX) minX = a.x; if (a.y < minY) minY = a.y; }
+    if (b) { if (b.x < minX) minX = b.x; if (b.y < minY) minY = b.y; }
+  }
+  if (!isFinite(minX)) { minX = 3; minY = 3; }
+  minX -= 3; minY -= 3;
+  const X = (x) => dxfNum((x - minX) * 1000);
+  const Y = (y) => dxfNum((y - minY) * 1000);
+
+  let cnt = 300;
+  const H = () => String(cnt++);
+
+  const out = [];
+  const push = (...a) => { for (const v of a) out.push(v); };
+  const pushTmpl = (s) => { for (const ln of (s || "").replace(/\r?\n$/, "").split(/\r?\n/)) out.push(ln); };
+
+  // 出力対象のポリライン/ブロック
+  const plines = trc.plines.filter(p => !p.del && p.pts.length >= 2 && (p.name || "").indexOf("PMADO") !== 0);
+  const usedBlocks = [];
+  const seenBlk = new Set();
+  for (const ins of trc.inserts) {
+    if (ins.del || ins.sketch) continue;
+    const blk = trc.blocks.get(ins.block);
+    if (blk && blk.pts.length && !seenBlk.has(ins.block)) { seenBlk.add(ins.block); usedBlocks.push(blk); }
+  }
+
+  // 1) HEADER / CLASSES（雛形・完結）
+  pushTmpl(T.HEADERSECTION00);
+  pushTmpl(T.CLASSESSECTION00);
+
+  // 2) TABLES（雛形は BLOCK_RECORD テーブルを開いた状態で終了）→ 動的 BLOCK_RECORD
+  pushTmpl(T.TABLESSECTION00);
+  for (const pl of plines) push("0", "BLOCK_RECORD", "5", H(), "100", "AcDbSymbolTableRecord", "100", "AcDbBlockTableRecord", "2", pl.name);
+  for (const blk of usedBlocks) push("0", "BLOCK_RECORD", "5", H(), "100", "AcDbSymbolTableRecord", "100", "AcDbBlockTableRecord", "2", blk.name);
+  push("0", "ENDTAB", "0", "ENDSEC");
+
+  // 3) BLOCKS（雛形は *Paper_Space まで）→ 動的ブロック
+  pushTmpl(T.BLOCKSSECTION00);
+  const blockDef = (name, segs) => {
+    push("0", "BLOCK", "5", H(), "100", "AcDbEntity", "8", "0", "100", "AcDbBlockBegin",
+      "2", name, "70", "0", "10", "0.0", "20", "0.0", "30", "0.0", "3", name, "1", "");
+    for (const [x1, y1, x2, y2] of segs)
+      push("0", "LINE", "5", H(), "100", "AcDbEntity", "8", "0", "100", "AcDbLine",
+        "10", x1, "20", y1, "30", "0.0", "11", x2, "21", y2, "31", "0.0");
+    push("0", "ENDBLK", "5", H(), "100", "AcDbEntity", "8", "0", "100", "AcDbBlockEnd");
+  };
+  for (const pl of plines) {
+    const segs = [];
+    for (let i = 1; i < pl.pts.length; i++)
+      segs.push([X(pl.pts[i - 1].x), Y(pl.pts[i - 1].y), X(pl.pts[i].x), Y(pl.pts[i].y)]);
+    blockDef(pl.name, segs);
+  }
+  for (const blk of usedBlocks) {
+    const segs = [];
+    for (let i = 1; i < blk.pts.length; i++)
+      segs.push([dxfNum(blk.pts[i - 1].x * 1000), dxfNum(blk.pts[i - 1].y * 1000),
+                 dxfNum(blk.pts[i].x * 1000), dxfNum(blk.pts[i].y * 1000)]);
+    blockDef(blk.name, segs);
+  }
+  push("0", "ENDSEC");
+
+  // 4) ENTITIES
+  push("0", "SECTION", "2", "ENTITIES");
+
+  for (const p of trc.points) {
+    if ((p.notDisp || p.sketch) && !p.yoten) continue;
+    if (!p.name) continue;
+    if (p.name.charAt(0).toUpperCase() === DXF_SKETCH_SYMBOL) continue;
+    push("0", "POINT", "5", H(), "100", "AcDbEntity", "8", "0", "100", "AcDbPoint",
+      "10", X(p.x), "20", Y(p.y), "30", "0.0");
+    push("0", "TEXT", "5", H(), "100", "AcDbEntity", "8", "0", "100", "AcDbText",
+      "10", dxfNum((p.x - minX) * 1000 - (150 + 250 * (p.name.length - 1))),
+      "20", dxfNum((p.y - minY) * 1000 + 300), "30", "0.0",
+      "40", "500.0", "1", p.name, "7", "Standard", "100", "AcDbText");
+  }
+
+  for (const ln of trc.lines) {
+    if (ln.del || ln.sketch) continue;
+    const c0 = (ln.layer || "").charAt(0);
+    if (c0 === "S" || c0 === "K" || c0 === "L") continue;
+    const a = trc.pointMap.get(ln.pnA), b = trc.pointMap.get(ln.pnB);
+    if (!a || !b) continue;
+    push("0", "LINE", "5", H(), "100", "AcDbEntity", "8", dxfLineLayer(ln.layer));
+    if (ln.style === 1) push("6", "HIDDEN-2");
+    else if (ln.style === 2) push("6", "DASHED-2");
+    else if (ln.style === 3) push("6", "DASHED-4");
+    push("100", "AcDbLine", "10", X(a.x), "20", Y(a.y), "30", "0.0", "11", X(b.x), "21", Y(b.y), "31", "0.0");
+  }
+
+  for (const c of trc.circles) {
+    if (c.del || c.sketch) continue;
+    const c0 = (c.layer || "").charAt(0);
+    if (c0 === "S" || c0 === "K") continue;
+    if (Math.abs(c.r - DXF_BOUNDARY_RADIUS) < 1e-6 && c.fill === 1) {
+      const cx = (c.x - minX) * 1000, cy = (c.y - minY) * 1000;
+      const lay = (c.pointName || "").charAt(0).toUpperCase() === "K" ? "KYOMOJI" : "KYO";
+      push("0", "LWPOLYLINE", "5", H(), "100", "AcDbEntity", "8", lay, "100", "AcDbPolyline",
+        "90", "2", "70", "1", "43", "75.0",
+        "10", dxfNum(cx - 37.5), "20", dxfNum(cy), "42", "1.0",
+        "10", dxfNum(cx + 37.5), "20", dxfNum(cy), "42", "1.0");
+    } else {
+      push("0", "CIRCLE", "5", H(), "100", "AcDbEntity", "8", dxfCircleLayer(c.layer), "100", "AcDbCircle",
+        "10", X(c.x), "20", Y(c.y), "30", "0.0", "40", dxfNum(c.r * 1000));
+    }
+  }
+
+  for (const m of trc.mojis) {
+    if (m.del || m.sketch) continue;
+    const c0 = (m.layer || "").charAt(0);
+    if (c0 === "S" || c0 === "L") continue;
+    if (m.text == null) m.text = "";
+    const lay = dxfMojiLayer(m.layer);
+    const rows = String(m.text).split(/\r?\n/);
+    if (rows.length > 1) {
+      const LS = 265;
+      rows.forEach((row, i) => {
+        push("0", "TEXT", "5", H(), "100", "AcDbEntity", "8", lay, "100", "AcDbText",
+          "10", X(m.x), "20", dxfNum((m.y - minY) * 1000 + (rows.length * LS) / 2 - i * LS - 185),
+          "30", "0.0", "40", "200.0", "1", row.trim(), "72", "0", "7", "MSPGothic", "100", "AcDbText");
+      });
+    } else {
+      push("0", "TEXT", "5", H(), "100", "AcDbEntity", "8", lay, "100", "AcDbText",
+        "10", X(m.x), "20", Y(m.y), "30", "0.0", "40", "200.0", "1", m.text);
+      if (m.angle) push("50", String(360 - m.angle));
+      push("72", "4", "11", X(m.x), "21", Y(m.y), "7", "MSPGothic", "100", "AcDbText");
+    }
+  }
+
+  for (const ins of trc.inserts) {
+    if (ins.del || ins.sketch) continue;
+    const blk = trc.blocks.get(ins.block);
+    if (!blk || blk.pts.length === 0) continue;
+    const bname = ins.block === "Uekomi" ? "KABU1" : ins.block;
+    push("0", "INSERT", "5", H(), "100", "AcDbEntity", "8", dxfInsertLayer(ins.layer), "100", "AcDbBlockReference",
+      "2", bname, "10", X(ins.x), "20", Y(ins.y), "30", "0.0");
+    if (ins.angle) push("50", String(-ins.angle));
+  }
+
+  for (const pl of plines) {
+    push("0", "INSERT", "5", H(), "100", "AcDbEntity", "8", "0", "100", "AcDbBlockReference",
+      "2", pl.name, "10", "0.0", "20", "0.0", "30", "0.0");
+  }
+
+  // コメント → MTEXT
+  const comments = trc.comments.filter(c => c.check).sort((a, b) => a.sort - b.sort);
+  if (comments.length) {
+    let mxX = -Infinity, mxY = -Infinity;
+    for (const p of trc.points) if (!p.notDisp) { if (p.x > mxX) mxX = p.x; if (p.y > mxY) mxY = p.y; }
+    if (!isFinite(mxX)) { mxX = minX; mxY = minY; }
+    let posY = (mxY - minY) * 1000;
+    const posX = (mxX - minX) * 1000 + 3000;
+    for (const c of comments) {
+      push("0", "MTEXT", "5", H(), "100", "AcDbEntity", "8", "TEXT", "100", "AcDbMText",
+        "10", dxfNum(posX), "20", dxfNum(posY), "30", "0.0", "40", "250.0",
+        "1", String(c.text).replace(/\|/g, "\\P"));
+      posY -= (String(c.text).split("|").length * 250 + 800);
+    }
+  }
+
+  push("0", "ENDSEC");
+
+  // 5) OBJECTS（雛形・完結）+ EOF
+  pushTmpl(T.OBJECTSSECTION00);
+  push("0", "EOF");
+
+  return out.join("\r\n") + "\r\n";
+}
+
+async function saveDxf() {
   if (!hasData) return;
   const base = (currentName || "drawing").replace(/\.[^.]*$/, "");
   let text;
-  if (mode === "trc") text = trcToDxf(trc);
-  else if (mode === "dxf") text = entitiesToDxf(entities);
-  else return;
-  const blob = new Blob([text], { type: "application/dxf" });
+  if (mode === "dxf") { text = entitiesToDxf(entities); }
+  else if (mode === "trc") {
+    try {
+      text = await trcToDxfFull(trc);            // AC1015 (trcad 構造準拠)
+    } catch (e) {
+      console.warn("AC1015 雛形を読めないため R12 で出力します:", e);
+      text = trcToDxf(trc);                      // 雛形が無い場合は軽量 R12 にフォールバック
+    }
+  } else { return; }
+  downloadBlob(new Blob([text], { type: "application/dxf" }), base + ".dxf");
+}
+
+function downloadBlob(blob, filename) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = base + ".dxf";
+  a.download = filename;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
@@ -1269,9 +1898,215 @@ function saveDxf() {
 }
 
 // ===========================================================================
+// レベル（水準）データ Excel 出力 — trcad 雛形 Level入力.xlsm への差し込み方式
+//   cad-trcad frmTrCAD.btnLevelExcel_Click を参考に実装。
+//   雛形を fetch → A=点名 / B=BS(m) / C=FS(m) を該当セルへ差し込み → .xlsm 出力。
+//   D(器械高)/E(実測値)/F(較差) は雛形の数式をそのまま保持し Excel が再計算する。
+//   雛形の変更しないエントリ(マクロ/書式/図形等)は元の圧縮バイトをそのまま流用する。
+// ===========================================================================
+const CRC32_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+
+function crc32(u8) {
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < u8.length; i++) c = CRC32_TABLE[(c ^ u8[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+
+const xmlEsc = (s) => String(s == null ? "" : s)
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+  .replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+
+// 汎用 ZIP ビルダ。各エントリ: { name, method, crc, compSize, uncompSize, data }
+//   method=0(無圧縮): data は生バイト。method=8(deflate): data は元の圧縮バイトを流用。
+function zipBuild(entries) {
+  const enc = new TextEncoder();
+  const u16 = (n) => [n & 0xFF, (n >>> 8) & 0xFF];
+  const u32 = (n) => [n & 0xFF, (n >>> 8) & 0xFF, (n >>> 16) & 0xFF, (n >>> 24) & 0xFF];
+  const parts = [], central = [];
+  let offset = 0;
+  for (const e of entries) {
+    const nameBytes = enc.encode(e.name);
+    const lh = new Uint8Array([].concat(
+      u32(0x04034b50), u16(20), u16(0x0800), u16(e.method), u16(0), u16(0),
+      u32(e.crc), u32(e.compSize), u32(e.uncompSize), u16(nameBytes.length), u16(0)
+    ));
+    parts.push(lh, nameBytes, e.data);
+    const cen = new Uint8Array([].concat(
+      u32(0x02014b50), u16(20), u16(20), u16(0x0800), u16(e.method), u16(0), u16(0),
+      u32(e.crc), u32(e.compSize), u32(e.uncompSize), u16(nameBytes.length),
+      u16(0), u16(0), u16(0), u16(0), u32(0), u32(offset)
+    ));
+    central.push(cen, nameBytes);
+    offset += lh.length + nameBytes.length + e.data.length;
+  }
+  const centralStart = offset;
+  let centralSize = 0; for (const c of central) centralSize += c.length;
+  const eocd = new Uint8Array([].concat(
+    u32(0x06054b50), u16(0), u16(0), u16(entries.length), u16(entries.length),
+    u32(centralSize), u32(centralStart), u16(0)
+  ));
+  let total = eocd.length;
+  for (const p of parts) total += p.length;
+  for (const c of central) total += c.length;
+  const out = new Uint8Array(total); let pos = 0;
+  for (const p of parts)   { out.set(p, pos); pos += p.length; }
+  for (const c of central) { out.set(c, pos); pos += c.length; }
+  out.set(eocd, pos);
+  return out;
+}
+
+// ZIP を全エントリ解析（セントラルディレクトリ基準・順序保持）。
+function parseZipAll(buf) {
+  const dv = new DataView(buf), u8 = new Uint8Array(buf);
+  const asc = new TextDecoder("ascii");
+  let eocd = -1;
+  for (let i = buf.byteLength - 22; i >= 0; i--) {
+    if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) throw new Error("ZIP 終端レコードが見つかりません");
+  const cdCount = dv.getUint16(eocd + 10, true);
+  let p = dv.getUint32(eocd + 16, true);
+  const entries = [];
+  for (let k = 0; k < cdCount; k++) {
+    if (dv.getUint32(p, true) !== 0x02014b50) break;
+    const method = dv.getUint16(p + 10, true);
+    const crc = dv.getUint32(p + 16, true);
+    const compSize = dv.getUint32(p + 20, true);
+    const uncompSize = dv.getUint32(p + 24, true);
+    const nameLen = dv.getUint16(p + 28, true);
+    const extraLen = dv.getUint16(p + 30, true);
+    const cmtLen = dv.getUint16(p + 32, true);
+    const lhOff = dv.getUint32(p + 42, true);
+    const name = asc.decode(u8.subarray(p + 46, p + 46 + nameLen));
+    const lNameLen = dv.getUint16(lhOff + 26, true);
+    const lExtraLen = dv.getUint16(lhOff + 28, true);
+    const start = lhOff + 30 + lNameLen + lExtraLen;
+    entries.push({ name, method, crc, compSize, uncompSize,
+                   data: u8.slice(start, start + compSize) });
+    p += 46 + nameLen + extraLen + cmtLen;
+  }
+  return entries;
+}
+
+const LEVEL_TEMPLATE_URL = "Level入力.xlsm";
+
+async function exportLevelExcel() {
+  if (mode !== "trc" || !trc || !trc.levels.length) return;
+  const calc = computeLevels(trc.levels);
+  const isNum = (s) => { s = (s == null ? "" : String(s)).trim(); return s !== "" && !isNaN(Number(s)); };
+  const m = (s) => Math.round(Number(String(s).trim())) / 1000; // mm→m
+
+  // 雛形を取得
+  let tmplBuf;
+  try {
+    const res = await fetch(LEVEL_TEMPLATE_URL);
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    tmplBuf = await res.arrayBuffer();
+  } catch (e) {
+    alert("レベル雛形 (Level入力.xlsm) を読み込めません: " + (e && e.message ? e.message : e)
+        + "\nindex.html と同じフォルダに Level入力.xlsm を置いてください。");
+    return;
+  }
+
+  const entries = parseZipAll(tmplBuf);
+  const enc = new TextEncoder();
+  const dec = new TextDecoder("utf-8");
+
+  // 書き込み対象（点名あり かつ BS/FS/TP のいずれかが数値）
+  const data = calc.filter(r =>
+    r.name != null && String(r.name).trim() !== "" &&
+    (isNum(r.bs) || isNum(r.fs) || isNum(r.tp)));
+
+  // --- sheet1.xml にセル差し込み（A=点名 / B=BS / C=FS） ---
+  const sheetEntry = entries.find(e => e.name === "xl/worksheets/sheet1.xml");
+  if (!sheetEntry) { alert("雛形の sheet1.xml が見つかりません"); return; }
+  let sheet = dec.decode(sheetEntry.method === 8 ? await inflateRaw(sheetEntry.data) : sheetEntry.data);
+
+  const ROWS_PER_BLOCK = 100, BLOCK_COLS = 6, DATA_ROW = 6;
+  const colLet = (i) => { let s = "", n = i + 1; while (n > 0) { const r = (n - 1) % 26; s = String.fromCharCode(65 + r) + s; n = (n - r - 1) / 26; } return s; };
+
+  // 指定セルの値を差し替え（style 属性 s= は維持。元の数式は除去される）
+  const setCell = (ref, mk) => {
+    const re = new RegExp('<c r="' + ref + '"([^>]*?)(?:/>|>[\\s\\S]*?</c>)');
+    sheet = sheet.replace(re, (full, attrs) => {
+      const sm = (attrs || "").match(/\ss="(\d+)"/);
+      return mk(sm ? ' s="' + sm[1] + '"' : "");
+    });
+  };
+  const cellNum = (ref, val) => setCell(ref, (s) => '<c r="' + ref + '"' + s + '><v>' + val + '</v></c>');
+  const cellStr = (ref, val) => setCell(ref, (s) => '<c r="' + ref + '"' + s + ' t="inlineStr"><is><t xml:space="preserve">' + xmlEsc(val) + '</t></is></c>');
+  const cellEmpty = (ref) => setCell(ref, (s) => '<c r="' + ref + '"' + s + '/>');
+
+  // trcad frmTrCAD.btnLevelExcel_Click と同じ分岐順で列へ書き込む。
+  //   BS数値 → B列、BS基準値 LevelBS を BS+GH で更新
+  //   BS参照[n] → C列に物理前視値 (LevelBS - GH)/1000
+  //   FS数値 / TP数値 → C列
+  let levelBS = 0; // BS基準値 (mm)。btnLevelExcel の LevelBS に相当
+  data.forEach((r, d) => {
+    const cb = Math.floor(d / ROWS_PER_BLOCK) * BLOCK_COLS;
+    const rr = DATA_ROW + (d % ROWS_PER_BLOCK);
+    const bs = (r.bs == null ? "" : String(r.bs)).trim();
+    const gh = (r.gh != null && isFinite(r.gh)) ? r.gh : null;
+    cellStr(colLet(cb + 0) + rr, String(r.name));                 // A: 点名（数式を上書き）
+    if (isNum(bs)) {
+      cellNum(colLet(cb + 1) + rr, m(bs));                        // B: BS (m)
+      if (gh != null) levelBS = Number(bs) + gh;                  // BS基準値を更新
+    } else if (bs.charAt(0) === "[") {
+      if (gh != null) cellNum(colLet(cb + 2) + rr, (levelBS - gh) / 1000); // C: 参照点の物理前視値
+    } else if (isNum(r.fs)) {
+      cellNum(colLet(cb + 2) + rr, m(r.fs));                      // C: FS (m)
+    } else if (isNum(r.tp)) {
+      cellNum(colLet(cb + 2) + rr, m(r.tp));                      // C: TP も FS 列
+    }
+  });
+  // 最終データ行の次の A セルを空にして自動連番(数式)を止める
+  if (data.length) {
+    const lastIdx = data.length - 1;
+    const cb = Math.floor(lastIdx / ROWS_PER_BLOCK) * BLOCK_COLS;
+    const off = lastIdx % ROWS_PER_BLOCK;
+    if (off + 1 < ROWS_PER_BLOCK) cellEmpty(colLet(cb) + (DATA_ROW + off + 1));
+  }
+  sheetEntry.method = 0;
+  sheetEntry.data = enc.encode(sheet);
+  sheetEntry.crc = crc32(sheetEntry.data);
+  sheetEntry.compSize = sheetEntry.uncompSize = sheetEntry.data.length;
+
+  // --- workbook.xml: 起動時に数式を全再計算させる ---
+  const wbEntry = entries.find(e => e.name === "xl/workbook.xml");
+  if (wbEntry) {
+    let wb = dec.decode(wbEntry.method === 8 ? await inflateRaw(wbEntry.data) : wbEntry.data);
+    if (/<calcPr[^>]*>/.test(wb)) {
+      wb = wb.replace(/<calcPr([^>]*?)\/>/, (full, a) =>
+        /fullCalcOnLoad/.test(a) ? full : '<calcPr' + a + ' fullCalcOnLoad="1"/>');
+    } else {
+      wb = wb.replace('</sheets>', '</sheets><calcPr fullCalcOnLoad="1"/>');
+    }
+    wbEntry.method = 0;
+    wbEntry.data = enc.encode(wb);
+    wbEntry.crc = crc32(wbEntry.data);
+    wbEntry.compSize = wbEntry.uncompSize = wbEntry.data.length;
+  }
+
+  const base = (currentName || "level").replace(/\.[^.]*$/, "");
+  const out = zipBuild(entries);
+  downloadBlob(new Blob([out], {
+    type: "application/vnd.ms-excel.sheet.macroEnabled.12"
+  }), base + "_Level.xlsm");
+}
+
+// ===========================================================================
 // イベント
 // ===========================================================================
 saveBtn.addEventListener("click", saveDxf);
+levelXlsxBtn.addEventListener("click", exportLevelExcel);
 
 document.getElementById("fileInput").addEventListener("change", (e) => {
   handleFile(e.target.files[0]);

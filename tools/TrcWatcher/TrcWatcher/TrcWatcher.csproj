@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>TrcWatcher</RootNamespace>
+    <AssemblyName>TrcWatcher</AssemblyName>
+  </PropertyGroup>
+
+  <!--
+    Shift-JIS(CP932) は CodePagesEncodingProvider 経由で利用する。
+    net10.0-windows ではフレームワークに含まれるため追加パッケージは不要。
+  -->
+
+</Project>
