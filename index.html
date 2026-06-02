@@ -49,6 +49,20 @@
   #saveBtn:hover { background: #469152; }
   #saveBtn.hidden { display: none; }
 
+  #levelXlsxBtn {
+    font-size: 12px;
+    background: #1f7a6e;
+    color: #fff;
+    border: none;
+    padding: 5px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    white-space: nowrap;
+    font-family: inherit;
+  }
+  #levelXlsxBtn:hover { background: #259384; }
+  #levelXlsxBtn.hidden { display: none; }
+
   #main { display: flex; flex: 1 1 auto; min-height: 0; }
   #stage { position: relative; flex: 2 1 0; min-width: 0; overflow: hidden; }
   #splitter { flex: 0 0 6px; background: #3f3f46; cursor: col-resize; }
@@ -76,15 +90,15 @@
 
   #hud {
     position: absolute; left: 12px; bottom: 10px;
-    font-size: 11px; color: #888;
-    background: rgba(0,0,0,0.4);
+    font-size: 11px; color: #e6e6e6;
+    background: rgba(0,0,0,0.72);
     padding: 4px 8px; border-radius: 4px;
     pointer-events: none;
   }
   #coord {
     position: absolute; right: 12px; bottom: 10px;
-    font-size: 11px; color: #9ad; font-variant-numeric: tabular-nums;
-    background: rgba(0,0,0,0.4);
+    font-size: 11px; color: #bfe0ff; font-variant-numeric: tabular-nums;
+    background: rgba(0,0,0,0.72);
     padding: 4px 8px; border-radius: 4px;
     pointer-events: none;
   }
@@ -146,6 +160,12 @@
   #panel td.err { background: #5a1f1f; color: #ffb3b3; font-weight: bold; }
   #panel .empty { color: #777; }
   #panel .note { color: #888; margin: 4px 0 0; font-size: 11px; }
+  #panel pre.raw {
+    margin: 0; padding: 8px; background: #1a1a1d; border: 1px solid #333337;
+    border-radius: 4px; color: #d4d4d4; font-size: 11px; line-height: 1.45;
+    white-space: pre; overflow: auto; max-height: calc(100vh - 160px);
+    font-family: "Consolas", "Courier New", monospace;
+  }
 </style>
 </head>
 <body>
@@ -158,6 +178,7 @@
       <input id="fileInput" type="file" accept=".dxf,.trc" hidden>
     </label>
     <button id="saveBtn" class="hidden" title="表示中の図面を DXF (R12) で保存">DXF保存</button>
+    <button id="levelXlsxBtn" class="hidden" title="レベル（水準）データを雛形 Excel (.xlsm) に差し込んで出力">レベルExcel</button>
     <button id="viewToggle" class="hidden" title="図面とデータを切り替え">📋 データ</button>
     <div id="controls" class="hidden">
       <label><input type="checkbox" id="chkLine" checked> 線</label>
@@ -347,8 +368,17 @@ function extractZipEntry(buf, wantName) {
 }
 
 function decodeSjis(u8) {
-  try { return new TextDecoder("shift_jis", { fatal: false }).decode(u8); }
-  catch (e) { return new TextDecoder("utf-8", { fatal: false }).decode(u8); }
+  // UTF-8 BOM があれば UTF-8 確定
+  if (u8.length >= 3 && u8[0] === 0xEF && u8[1] === 0xBB && u8[2] === 0xBF) {
+    return new TextDecoder("utf-8", { fatal: false }).decode(u8);
+  }
+  // 厳密 UTF-8 として解釈できれば UTF-8、不正バイト列なら Shift_JIS とみなす。
+  // (ASCII のみのファイルは両者同一なので影響なし)
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(u8);
+  } catch (e) {
+    return new TextDecoder("shift_jis", { fatal: false }).decode(u8);
+  }
 }
 
 // ArrayBuffer -> TrDATA テキスト (ZIP / 平文の両対応)
@@ -392,7 +422,7 @@ function parseTrc(text) {
   const trc = {
     points: [], lines: [], circles: [], mojis: [],
     hedges: [], plines: [], blocks: new Map(), inserts: [],
-    levels: [], surveyData: []
+    levels: [], surveyData: [], surveyRaw: []
   };
   let section = null;
   let inBlockPts = false, inPlinePts = false;
@@ -419,6 +449,8 @@ function parseTrc(text) {
       if (line === "*DATA -SECTION") { inDataSec = true; continue; }
       if (line === "*END-SECTION") { inDataSec = false; continue; }
       if (line[0] === "*" || line[0] === "#") continue; // *BASE -SECTION や *** コメント
+      // 野帳が O1K/O2K 形式 (行頭 A/B/C/D/E/F/Z…) の場合に備え生行を保持
+      trc.surveyRaw.push(line);
       if (!inDataSec) continue;
       const f = splitCsv(line);
       if (f.length < 8) continue;
@@ -496,8 +528,73 @@ function parseTrc(text) {
     }
   }
 
+  // *DATA -SECTION 形式で測角データが取れなかった場合、O1K/O2K 野帳形式を解釈する
+  if (trc.surveyData.length === 0 && trc.surveyRaw.length) {
+    trc.surveyData = parseSurveyO1kO2k(trc.surveyRaw);
+  }
+
   trc.pointMap = new Map(trc.points.map(p => [p.name, p]));
   return trc;
+}
+
+// O1K / O2K 野帳形式 (MAGNET Field 等) の測角データを解釈する。
+// cad-trcad frmTrCAD.AddDataTable_O1kO2k を移植。
+//   D,<器械点>,...            器械点設定
+//   F,<点名>,, ,<符号>,<水平角DDD.MMSS>,<鉛直角>,<斜距離>,…,<水平距離(13)>,<水平距離(14)>,…
+//   各器械点で最初の F は後視点、以降の F が観測 (測点) 行。
+//   O1K は距離が item[13]、O2K は item[14]。
+function parseSurveyO1kO2k(lines) {
+  const rows = [];
+  const dec = (s) => {                       // VB CDec(...).ToString 相当 (数値なら桁揃え無しの数値文字列)
+    s = (s == null ? "" : String(s)).trim();
+    return (s !== "" && !isNaN(Number(s))) ? String(Number(s)) : s;
+  };
+  let ipTen = "", bsTen = "";
+  let flgRead = false, flgReadO1k1st = false;
+
+  for (const txt of lines) {
+    const lst = txt.split(",");
+    const code = (lst[0] || "").trim();
+    if (code === "Z") {
+      flgRead = false; flgReadO1k1st = false;
+    } else if (code === "D") {
+      flgRead = false;
+      ipTen = (lst[1] || "").trim();
+    } else if (code === "F") {
+      if (!flgRead) bsTen = (lst[1] || "").trim();
+
+      // O1K: item[13] に距離があり、まだ初回観測を読んでいない場合
+      if ((lst[13] || "") !== "" && !flgReadO1k1st) {
+        flgRead = true;
+        bsTen = "N";
+      }
+
+      if (!flgRead) {
+        flgRead = true;            // この F は後視点 → 行を作らずスキップ
+      } else {
+        if ((lst[13] || "") !== "") flgReadO1k1st = true;
+
+        const sokuTen = (lst[1] || "").trim();
+
+        // 水平角 DDD.MMSS
+        const ang = lst[5] || "";
+        const doo  = dec(ang.substr(0, 3));
+        const fun  = dec(ang.substr(4, 2));
+        const byou = dec(ang.substr(6, 2));
+
+        // 水平距離 (O1K=13 / O2K=14)
+        let dist = (lst[13] || "");
+        if (dist === "") dist = (lst[14] || "");
+        if (dist.trim() !== "" && !isNaN(Number(dist))) dist = Number(dist).toFixed(3);
+
+        rows.push({ ip: ipTen, bs: bsTen, sokuten: sokuTen,
+                    sui: doo, hei: fun, kaku: byou, dist, err: "" });
+
+        ipTen = ""; bsTen = "";
+      }
+    }
+  }
+  return rows;
 }
 
 // ===========================================================================
@@ -546,7 +643,8 @@ function computeLevels(levels) {
     }
 
     if (NM !== "" && gh != null) fixed.push({ name: NM, gh });
-    return { name: l.name, bs: l.bs, fs: l.fs, tp: l.tp, remarks: l.remarks, gh, ck, ckError };
+    // 器械高(IH) = 基準高 + 後視 (mm)。trcad レベルExcel の D 列に相当。
+    return { name: l.name, bs: l.bs, fs: l.fs, tp: l.tp, remarks: l.remarks, gh, ck, ckError, ih: levelGH + levelBS };
   });
 }
 
@@ -565,12 +663,14 @@ const chkLabel = document.getElementById("chkLabel");
 const chkMoji = document.getElementById("chkMoji");
 const chkFrame = document.getElementById("chkFrame");
 const saveBtn = document.getElementById("saveBtn");
+const levelXlsxBtn = document.getElementById("levelXlsxBtn");
 const viewToggle = document.getElementById("viewToggle");
 
 let mode = null;          // "dxf" | "trc"
 let currentName = "";     // 読み込み中ファイル名
 let entities = [];        // DXF
 let trc = null;           // TRC
+let trcRawText = "";      // TRC 生テキスト
 let view = { scale: 1, ox: 0, oy: 0 };
 let hasData = false;
 
@@ -945,6 +1045,11 @@ function shapeHtml() {
     + `<tr><td class="l">ポリライン</td><td>${trc.plines.length}</td></tr></table>`;
 }
 
+function rawTextHtml() {
+  if (!trcRawText) return '<div class="empty">データなし</div>';
+  return `<pre class="raw">${esc(trcRawText)}</pre>`;
+}
+
 function surveyHtml() {
   if (!trc.surveyData.length) return '<div class="empty">データなし</div>';
   let html = "<table><tr><th>器械点</th><th>後視点</th><th>測点</th><th>水</th><th>平</th><th>角</th><th>距離</th><th>誤差</th></tr>";
@@ -1004,6 +1109,7 @@ function renderPanel() {
     { key: "shape",  label: "図形" },
     { key: "survey", label: "測角データ" },
     { key: "level",  label: "レベル（水準）" },
+    { key: "raw",    label: "TRCデータ" },
   ];
   let html = '<div class="tabs">';
   for (const t of tabs) {
@@ -1012,6 +1118,7 @@ function renderPanel() {
   html += "</div><div class=\"tabBody\">";
   if (activeTab === "survey")      html += surveyHtml();
   else if (activeTab === "level")  html += levelHtml();
+  else if (activeTab === "raw")    html += rawTextHtml();
   else                             html += shapeHtml();
   html += "</div>";
   panel.innerHTML = html;
@@ -1061,6 +1168,9 @@ function finishLoad(name, summary) {
   dropEl.classList.add("hidden");
   dropEl.classList.remove("empty");
   saveBtn.classList.remove("hidden");
+  // レベルExcel出力は TRC でレベルデータがある場合のみ
+  if (mode === "trc" && trc && trc.levels.length > 0) levelXlsxBtn.classList.remove("hidden");
+  else levelXlsxBtn.classList.add("hidden");
   viewToggle.classList.remove("hidden");
   mainEl.classList.remove("view-panel"); // 読込時はまず図面を全面表示 (スマホ)
   viewToggle.textContent = "📋 データ";
@@ -1078,6 +1188,7 @@ async function handleFile(file) {
     const buf = await file.arrayBuffer();
     if (ext === "trc") {
       const text = await readTrcText(buf);
+      trcRawText = text;
       loadTrc(parseTrc(text), file.name);
     } else {
       const text = decodeText(buf);
@@ -1257,11 +1368,14 @@ function saveDxf() {
   if (mode === "trc") text = trcToDxf(trc);
   else if (mode === "dxf") text = entitiesToDxf(entities);
   else return;
-  const blob = new Blob([text], { type: "application/dxf" });
+  downloadBlob(new Blob([text], { type: "application/dxf" }), base + ".dxf");
+}
+
+function downloadBlob(blob, filename) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = base + ".dxf";
+  a.download = filename;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
@@ -1269,9 +1383,215 @@ function saveDxf() {
 }
 
 // ===========================================================================
+// レベル（水準）データ Excel 出力 — trcad 雛形 Level入力.xlsm への差し込み方式
+//   cad-trcad frmTrCAD.btnLevelExcel_Click を参考に実装。
+//   雛形を fetch → A=点名 / B=BS(m) / C=FS(m) を該当セルへ差し込み → .xlsm 出力。
+//   D(器械高)/E(実測値)/F(較差) は雛形の数式をそのまま保持し Excel が再計算する。
+//   雛形の変更しないエントリ(マクロ/書式/図形等)は元の圧縮バイトをそのまま流用する。
+// ===========================================================================
+const CRC32_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+
+function crc32(u8) {
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < u8.length; i++) c = CRC32_TABLE[(c ^ u8[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+
+const xmlEsc = (s) => String(s == null ? "" : s)
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+  .replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+
+// 汎用 ZIP ビルダ。各エントリ: { name, method, crc, compSize, uncompSize, data }
+//   method=0(無圧縮): data は生バイト。method=8(deflate): data は元の圧縮バイトを流用。
+function zipBuild(entries) {
+  const enc = new TextEncoder();
+  const u16 = (n) => [n & 0xFF, (n >>> 8) & 0xFF];
+  const u32 = (n) => [n & 0xFF, (n >>> 8) & 0xFF, (n >>> 16) & 0xFF, (n >>> 24) & 0xFF];
+  const parts = [], central = [];
+  let offset = 0;
+  for (const e of entries) {
+    const nameBytes = enc.encode(e.name);
+    const lh = new Uint8Array([].concat(
+      u32(0x04034b50), u16(20), u16(0x0800), u16(e.method), u16(0), u16(0),
+      u32(e.crc), u32(e.compSize), u32(e.uncompSize), u16(nameBytes.length), u16(0)
+    ));
+    parts.push(lh, nameBytes, e.data);
+    const cen = new Uint8Array([].concat(
+      u32(0x02014b50), u16(20), u16(20), u16(0x0800), u16(e.method), u16(0), u16(0),
+      u32(e.crc), u32(e.compSize), u32(e.uncompSize), u16(nameBytes.length),
+      u16(0), u16(0), u16(0), u16(0), u32(0), u32(offset)
+    ));
+    central.push(cen, nameBytes);
+    offset += lh.length + nameBytes.length + e.data.length;
+  }
+  const centralStart = offset;
+  let centralSize = 0; for (const c of central) centralSize += c.length;
+  const eocd = new Uint8Array([].concat(
+    u32(0x06054b50), u16(0), u16(0), u16(entries.length), u16(entries.length),
+    u32(centralSize), u32(centralStart), u16(0)
+  ));
+  let total = eocd.length;
+  for (const p of parts) total += p.length;
+  for (const c of central) total += c.length;
+  const out = new Uint8Array(total); let pos = 0;
+  for (const p of parts)   { out.set(p, pos); pos += p.length; }
+  for (const c of central) { out.set(c, pos); pos += c.length; }
+  out.set(eocd, pos);
+  return out;
+}
+
+// ZIP を全エントリ解析（セントラルディレクトリ基準・順序保持）。
+function parseZipAll(buf) {
+  const dv = new DataView(buf), u8 = new Uint8Array(buf);
+  const asc = new TextDecoder("ascii");
+  let eocd = -1;
+  for (let i = buf.byteLength - 22; i >= 0; i--) {
+    if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) throw new Error("ZIP 終端レコードが見つかりません");
+  const cdCount = dv.getUint16(eocd + 10, true);
+  let p = dv.getUint32(eocd + 16, true);
+  const entries = [];
+  for (let k = 0; k < cdCount; k++) {
+    if (dv.getUint32(p, true) !== 0x02014b50) break;
+    const method = dv.getUint16(p + 10, true);
+    const crc = dv.getUint32(p + 16, true);
+    const compSize = dv.getUint32(p + 20, true);
+    const uncompSize = dv.getUint32(p + 24, true);
+    const nameLen = dv.getUint16(p + 28, true);
+    const extraLen = dv.getUint16(p + 30, true);
+    const cmtLen = dv.getUint16(p + 32, true);
+    const lhOff = dv.getUint32(p + 42, true);
+    const name = asc.decode(u8.subarray(p + 46, p + 46 + nameLen));
+    const lNameLen = dv.getUint16(lhOff + 26, true);
+    const lExtraLen = dv.getUint16(lhOff + 28, true);
+    const start = lhOff + 30 + lNameLen + lExtraLen;
+    entries.push({ name, method, crc, compSize, uncompSize,
+                   data: u8.slice(start, start + compSize) });
+    p += 46 + nameLen + extraLen + cmtLen;
+  }
+  return entries;
+}
+
+const LEVEL_TEMPLATE_URL = "Level入力.xlsm";
+
+async function exportLevelExcel() {
+  if (mode !== "trc" || !trc || !trc.levels.length) return;
+  const calc = computeLevels(trc.levels);
+  const isNum = (s) => { s = (s == null ? "" : String(s)).trim(); return s !== "" && !isNaN(Number(s)); };
+  const m = (s) => Math.round(Number(String(s).trim())) / 1000; // mm→m
+
+  // 雛形を取得
+  let tmplBuf;
+  try {
+    const res = await fetch(LEVEL_TEMPLATE_URL);
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    tmplBuf = await res.arrayBuffer();
+  } catch (e) {
+    alert("レベル雛形 (Level入力.xlsm) を読み込めません: " + (e && e.message ? e.message : e)
+        + "\nindex.html と同じフォルダに Level入力.xlsm を置いてください。");
+    return;
+  }
+
+  const entries = parseZipAll(tmplBuf);
+  const enc = new TextEncoder();
+  const dec = new TextDecoder("utf-8");
+
+  // 書き込み対象（点名あり かつ BS/FS/TP のいずれかが数値）
+  const data = calc.filter(r =>
+    r.name != null && String(r.name).trim() !== "" &&
+    (isNum(r.bs) || isNum(r.fs) || isNum(r.tp)));
+
+  // --- sheet1.xml にセル差し込み（A=点名 / B=BS / C=FS） ---
+  const sheetEntry = entries.find(e => e.name === "xl/worksheets/sheet1.xml");
+  if (!sheetEntry) { alert("雛形の sheet1.xml が見つかりません"); return; }
+  let sheet = dec.decode(sheetEntry.method === 8 ? await inflateRaw(sheetEntry.data) : sheetEntry.data);
+
+  const ROWS_PER_BLOCK = 100, BLOCK_COLS = 6, DATA_ROW = 6;
+  const colLet = (i) => { let s = "", n = i + 1; while (n > 0) { const r = (n - 1) % 26; s = String.fromCharCode(65 + r) + s; n = (n - r - 1) / 26; } return s; };
+
+  // 指定セルの値を差し替え（style 属性 s= は維持。元の数式は除去される）
+  const setCell = (ref, mk) => {
+    const re = new RegExp('<c r="' + ref + '"([^>]*?)(?:/>|>[\\s\\S]*?</c>)');
+    sheet = sheet.replace(re, (full, attrs) => {
+      const sm = (attrs || "").match(/\ss="(\d+)"/);
+      return mk(sm ? ' s="' + sm[1] + '"' : "");
+    });
+  };
+  const cellNum = (ref, val) => setCell(ref, (s) => '<c r="' + ref + '"' + s + '><v>' + val + '</v></c>');
+  const cellStr = (ref, val) => setCell(ref, (s) => '<c r="' + ref + '"' + s + ' t="inlineStr"><is><t xml:space="preserve">' + xmlEsc(val) + '</t></is></c>');
+  const cellEmpty = (ref) => setCell(ref, (s) => '<c r="' + ref + '"' + s + '/>');
+
+  // trcad frmTrCAD.btnLevelExcel_Click と同じ分岐順で列へ書き込む。
+  //   BS数値 → B列、BS基準値 LevelBS を BS+GH で更新
+  //   BS参照[n] → C列に物理前視値 (LevelBS - GH)/1000
+  //   FS数値 / TP数値 → C列
+  let levelBS = 0; // BS基準値 (mm)。btnLevelExcel の LevelBS に相当
+  data.forEach((r, d) => {
+    const cb = Math.floor(d / ROWS_PER_BLOCK) * BLOCK_COLS;
+    const rr = DATA_ROW + (d % ROWS_PER_BLOCK);
+    const bs = (r.bs == null ? "" : String(r.bs)).trim();
+    const gh = (r.gh != null && isFinite(r.gh)) ? r.gh : null;
+    cellStr(colLet(cb + 0) + rr, String(r.name));                 // A: 点名（数式を上書き）
+    if (isNum(bs)) {
+      cellNum(colLet(cb + 1) + rr, m(bs));                        // B: BS (m)
+      if (gh != null) levelBS = Number(bs) + gh;                  // BS基準値を更新
+    } else if (bs.charAt(0) === "[") {
+      if (gh != null) cellNum(colLet(cb + 2) + rr, (levelBS - gh) / 1000); // C: 参照点の物理前視値
+    } else if (isNum(r.fs)) {
+      cellNum(colLet(cb + 2) + rr, m(r.fs));                      // C: FS (m)
+    } else if (isNum(r.tp)) {
+      cellNum(colLet(cb + 2) + rr, m(r.tp));                      // C: TP も FS 列
+    }
+  });
+  // 最終データ行の次の A セルを空にして自動連番(数式)を止める
+  if (data.length) {
+    const lastIdx = data.length - 1;
+    const cb = Math.floor(lastIdx / ROWS_PER_BLOCK) * BLOCK_COLS;
+    const off = lastIdx % ROWS_PER_BLOCK;
+    if (off + 1 < ROWS_PER_BLOCK) cellEmpty(colLet(cb) + (DATA_ROW + off + 1));
+  }
+  sheetEntry.method = 0;
+  sheetEntry.data = enc.encode(sheet);
+  sheetEntry.crc = crc32(sheetEntry.data);
+  sheetEntry.compSize = sheetEntry.uncompSize = sheetEntry.data.length;
+
+  // --- workbook.xml: 起動時に数式を全再計算させる ---
+  const wbEntry = entries.find(e => e.name === "xl/workbook.xml");
+  if (wbEntry) {
+    let wb = dec.decode(wbEntry.method === 8 ? await inflateRaw(wbEntry.data) : wbEntry.data);
+    if (/<calcPr[^>]*>/.test(wb)) {
+      wb = wb.replace(/<calcPr([^>]*?)\/>/, (full, a) =>
+        /fullCalcOnLoad/.test(a) ? full : '<calcPr' + a + ' fullCalcOnLoad="1"/>');
+    } else {
+      wb = wb.replace('</sheets>', '</sheets><calcPr fullCalcOnLoad="1"/>');
+    }
+    wbEntry.method = 0;
+    wbEntry.data = enc.encode(wb);
+    wbEntry.crc = crc32(wbEntry.data);
+    wbEntry.compSize = wbEntry.uncompSize = wbEntry.data.length;
+  }
+
+  const base = (currentName || "level").replace(/\.[^.]*$/, "");
+  const out = zipBuild(entries);
+  downloadBlob(new Blob([out], {
+    type: "application/vnd.ms-excel.sheet.macroEnabled.12"
+  }), base + "_Level.xlsm");
+}
+
+// ===========================================================================
 // イベント
 // ===========================================================================
 saveBtn.addEventListener("click", saveDxf);
+levelXlsxBtn.addEventListener("click", exportLevelExcel);
 
 document.getElementById("fileInput").addEventListener("change", (e) => {
   handleFile(e.target.files[0]);
