@@ -158,6 +158,12 @@
   #panel td.plus { color: #7fd17f; }
   #panel td.minus { color: #f08a8a; }
   #panel td.err { background: #5a1f1f; color: #ffb3b3; font-weight: bold; }
+  #panel td.mk-ok   { background: #16384a; color: #9fd6ff; }
+  #panel td.mk-warn { background: #4a3c10; color: #ffd866; }
+  #panel td.mk-ng   { background: #5a1f1f; color: #ffb3b3; font-weight: bold; }
+  #panel .note .mk-ok   { color: #9fd6ff; }
+  #panel .note .mk-warn { color: #ffd866; }
+  #panel .note .mk-ng   { color: #ffb3b3; }
   #panel .empty { color: #777; }
   #panel .note { color: #888; margin: 4px 0 0; font-size: 11px; }
   #panel pre.raw {
@@ -422,7 +428,8 @@ function parseTrc(text) {
   const trc = {
     points: [], lines: [], circles: [], mojis: [],
     hedges: [], plines: [], blocks: new Map(), inserts: [],
-    levels: [], surveyData: [], surveyRaw: []
+    levels: [], surveyData: [], surveyRaw: [],
+    mawariken: [], keisantenFlg: false
   };
   let section = null;
   let inBlockPts = false, inPlinePts = false;
@@ -524,6 +531,15 @@ function parseTrc(text) {
       case "*Block-Section*":
         if (inBlockPts) { if (curBlock) curBlock.pts.push({ x: num(f[0]), y: num(f[1]) }); }
         else { curBlock = { name: f[0], pts: [] }; trc.blocks.set(f[0], curBlock); }
+        break;
+      case "*Mawariken-Section*":
+        // KeisantenFlg,フラグ / または 境界(0),まわりけん入力(1),計算値(2),測定不能(3)
+        if (f[0] === "KeisantenFlg") { trc.keisantenFlg = (f[1] || "").trim() === "1"; }
+        else if (f.length >= 2) {
+          const input = (f[1] || "").trim();
+          const unable = f.length >= 4 ? /true/i.test(f[3] || "") : (input === "");
+          trc.mawariken.push({ kyokai: (f[0] || "").trim(), input, unable });
+        }
         break;
     }
   }
@@ -1090,6 +1106,75 @@ function levelHtml() {
   return html;
 }
 
+// ===========================================================================
+// まわりけん（境界一覧）— cad-trcad frmTrCAD.ShowData_dgvMawarikenCheck を移植
+//   境界点 K<n>(n≤300) を K1→K2…→Kmax→K1 と連結し、計算値=隣接間距離(m)。
+//   入力値は *Mawariken-Section* から取得。誤差=|入力-計算|×1000(mm)。
+//   判定: ≦20mm 〇 / ≦50mm △ / >50mm × / 入力空 未判定 / 数値でない・計算不可 −
+// ===========================================================================
+function mawarikenHtml() {
+  // 境界点 K<n> (n≤300) を収集
+  const kpts = new Map();
+  let kMax = 0;
+  for (const p of trc.points) {
+    const mm = /^K(\d+)$/.exec(p.name || "");
+    if (!mm) continue;
+    const n = parseInt(mm[1], 10);
+    if (n > 300) continue;
+    kpts.set(n, p);
+    if (n > kMax) kMax = n;
+  }
+  if (kMax < 2) return '<div class="empty">境界点（K1, K2 …）がありません</div>';
+
+  const dist = (a, b) => Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2);
+  const inputMap = new Map(trc.mawariken.map(m => [m.kyokai, m]));
+
+  // 行リストを構築（K1-K2 … Kmax-1-Kmax、kMax≧3 なら Kmax-K1 で閉合）
+  const rows = [];
+  for (let k = 1; k <= kMax - 1; k++) {
+    rows.push({ start: "K" + k, end: "K" + (k + 1), sp: kpts.get(k), ep: kpts.get(k + 1) });
+    if (k === kMax - 1 && kMax >= 3) {
+      rows.push({ start: "K" + kMax, end: "K1", sp: kpts.get(kMax), ep: kpts.get(1) });
+    }
+  }
+
+  let ngCount = 0;
+  let html = "<table><tr><th>境界</th><th>計算値</th><th>まわりけん</th><th>誤差(m)</th><th>不能</th></tr>";
+  for (const r of rows) {
+    const kyokai = r.start + " - " + r.end;
+    const calcStr = (r.sp && r.ep) ? dist(r.sp, r.ep).toFixed(3) : "";
+    const mk = inputMap.get(kyokai) || inputMap.get(r.start + " - " + r.end);
+    const input = mk ? (mk.input || "") : "";
+    const unable = mk ? mk.unable : false;
+
+    // 判定・誤差（trcad GetMawarikenGosa / GetMawarikenHantei）
+    let gosaCell = '<td class="empty"></td>';
+    if (unable) {
+      gosaCell = '<td class="mk-ng">不可</td>';
+    } else if (input.trim() === "") {
+      gosaCell = '<td class="empty"></td>'; // 未判定
+    } else if (isNaN(Number(input)) || calcStr === "") {
+      gosaCell = '<td class="mk-ng">－</td>'; ngCount++;
+    } else {
+      const keisan = Number(calcStr);
+      const gosaMm = Math.abs(Number(input) - keisan) * 1000;
+      const gosaInt = Math.round(gosaMm);
+      if (gosaMm <= 20) gosaCell = `<td class="mk-ok">${(gosaInt / 1000).toFixed(3)}</td>`;
+      else if (gosaMm <= 50) gosaCell = `<td class="mk-warn">${(gosaInt / 1000).toFixed(3)}</td>`;
+      else { gosaCell = '<td class="mk-ng">Over</td>'; ngCount++; }
+    }
+
+    html += `<tr><td class="l">${esc(kyokai)}</td><td>${esc(calcStr)}</td>`
+          + `<td>${esc(input)}</td>${gosaCell}<td>${unable ? "✓" : ""}</td></tr>`;
+  }
+  html += "</table>";
+  html += '<p class="note">計算値=隣接境界点間の距離(m)。誤差=|まわりけん入力−計算値|。'
+        + '<span class="mk-ok">〇≦20mm</span> / <span class="mk-warn">△≦50mm</span> / '
+        + '<span class="mk-ng">×&gt;50mm・判定不可</span>。</p>';
+  if (ngCount > 0) html += `<p class="note" style="color:#f08a8a">⚠ 許容超過・判定不可が ${ngCount} 件あります。</p>`;
+  return html;
+}
+
 function renderPanel() {
   if (!mode) { panel.innerHTML = ""; return; }
 
@@ -1109,6 +1194,7 @@ function renderPanel() {
     { key: "shape",  label: "図形" },
     { key: "survey", label: "測角データ" },
     { key: "level",  label: "レベル（水準）" },
+    { key: "mawari", label: "まわりけん" },
     { key: "raw",    label: "TRCデータ" },
   ];
   let html = '<div class="tabs">';
@@ -1118,6 +1204,7 @@ function renderPanel() {
   html += "</div><div class=\"tabBody\">";
   if (activeTab === "survey")      html += surveyHtml();
   else if (activeTab === "level")  html += levelHtml();
+  else if (activeTab === "mawari") html += mawarikenHtml();
   else if (activeTab === "raw")    html += rawTextHtml();
   else                             html += shapeHtml();
   html += "</div>";
