@@ -1530,13 +1530,27 @@ async function exportLevelExcel() {
   const cellStr = (ref, val) => setCell(ref, (s) => '<c r="' + ref + '"' + s + ' t="inlineStr"><is><t xml:space="preserve">' + xmlEsc(val) + '</t></is></c>');
   const cellEmpty = (ref) => setCell(ref, (s) => '<c r="' + ref + '"' + s + '/>');
 
+  // trcad frmTrCAD.btnLevelExcel_Click と同じ分岐順で列へ書き込む。
+  //   BS数値 → B列、BS基準値 LevelBS を BS+GH で更新
+  //   BS参照[n] → C列に物理前視値 (LevelBS - GH)/1000
+  //   FS数値 / TP数値 → C列
+  let levelBS = 0; // BS基準値 (mm)。btnLevelExcel の LevelBS に相当
   data.forEach((r, d) => {
     const cb = Math.floor(d / ROWS_PER_BLOCK) * BLOCK_COLS;
     const rr = DATA_ROW + (d % ROWS_PER_BLOCK);
+    const bs = (r.bs == null ? "" : String(r.bs)).trim();
+    const gh = (r.gh != null && isFinite(r.gh)) ? r.gh : null;
     cellStr(colLet(cb + 0) + rr, String(r.name));                 // A: 点名（数式を上書き）
-    if (isNum(r.bs)) cellNum(colLet(cb + 1) + rr, m(r.bs));        // B: BS (m)
-    if (isNum(r.fs)) cellNum(colLet(cb + 2) + rr, m(r.fs));        // C: FS (m)
-    else if (isNum(r.tp)) cellNum(colLet(cb + 2) + rr, m(r.tp));   // C: TP も FS 列
+    if (isNum(bs)) {
+      cellNum(colLet(cb + 1) + rr, m(bs));                        // B: BS (m)
+      if (gh != null) levelBS = Number(bs) + gh;                  // BS基準値を更新
+    } else if (bs.charAt(0) === "[") {
+      if (gh != null) cellNum(colLet(cb + 2) + rr, (levelBS - gh) / 1000); // C: 参照点の物理前視値
+    } else if (isNum(r.fs)) {
+      cellNum(colLet(cb + 2) + rr, m(r.fs));                      // C: FS (m)
+    } else if (isNum(r.tp)) {
+      cellNum(colLet(cb + 2) + rr, m(r.tp));                      // C: TP も FS 列
+    }
   });
   // 最終データ行の次の A セルを空にして自動連番(数式)を止める
   if (data.length) {
