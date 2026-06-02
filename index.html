@@ -1089,14 +1089,55 @@ function rawTextHtml() {
   return `<pre class="raw">${esc(trcRawText)}</pre>`;
 }
 
+// 与点チェック — cad-trcad frmTrCAD.YotenCalc / GetList_YotenCheck を移植。
+//   既知点を再観測する際は 点番=元番号+300 で付与（例 K1→K301）。
+//   与点(数値部>300 かつ 英字+(数値-300) が存在)と基準点の距離を求める。
+//   点番が "_" で始まるものは対象外。Map(与点名 → 距離m) を返す。
+const SURVEY_YOTEN_LIMIT = 0.02; // 20mm = 2cm (frmTrCAD._YotenDistThreshold)
+
+function computeYotenCheck() {
+  const map = new Map();
+  const pm = trc.pointMap || new Map();
+  for (const p of trc.points) {
+    const nm = p.name || "";
+    if (nm.charAt(0) === "_") continue;
+    const abc = nm.replace(/[0-9]/g, "");
+    const numStr = nm.replace(/[^0-9]/g, "");
+    if (numStr === "") continue;
+    let num = parseInt(numStr, 10);
+    if (!(num > 300)) continue;
+    let ref = null;
+    while (num - 300 > 0) {              // 300 を繰り返し引くケースも考慮
+      const rp = pm.get(abc + (num - 300));
+      if (rp) ref = rp;
+      num -= 300;
+    }
+    if (ref) map.set(nm, Math.hypot(ref.x - p.x, ref.y - p.y));
+  }
+  return map;
+}
+
 function surveyHtml() {
   if (!trc.surveyData.length) return '<div class="empty">データなし</div>';
+  const yoten = computeYotenCheck();
+  let overCount = 0;
   let html = "<table><tr><th>器械点</th><th>後視点</th><th>測点</th><th>水</th><th>平</th><th>角</th><th>距離</th><th>誤差</th></tr>";
   for (const s of trc.surveyData) {
+    let errCell = `<td>${esc(s.err)}</td>`;
+    const d = yoten.get(s.sokuten);
+    if (d != null) {
+      const over = d >= SURVEY_YOTEN_LIMIT;
+      if (over) overCount++;
+      errCell = `<td class="${over ? "err" : ""}">${d.toFixed(3)}</td>`;
+    }
     html += `<tr><td class="l">${esc(s.ip)}</td><td class="l">${esc(s.bs)}</td><td class="l">${esc(s.sokuten)}</td>`
-          + `<td>${esc(s.sui)}</td><td>${esc(s.hei)}</td><td>${esc(s.kaku)}</td><td>${esc(s.dist)}</td><td>${esc(s.err)}</td></tr>`;
+          + `<td>${esc(s.sui)}</td><td>${esc(s.hei)}</td><td>${esc(s.kaku)}</td><td>${esc(s.dist)}</td>${errCell}</tr>`;
   }
-  return html + "</table>";
+  html += "</table>";
+  html += `<p class="note">誤差=与点チェック（点番+300 で再観測した既知点と元点の距離 m）。`
+        + `|誤差| ≧ ${SURVEY_YOTEN_LIMIT * 1000}mm で許容超過（赤）。</p>`;
+  if (overCount > 0) html += `<p class="note" style="color:#f08a8a">⚠ 与点の許容超過が ${overCount} 件あります。</p>`;
+  return html;
 }
 
 function levelHtml() {
