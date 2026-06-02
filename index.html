@@ -429,7 +429,7 @@ function parseTrc(text) {
     points: [], lines: [], circles: [], mojis: [],
     hedges: [], plines: [], blocks: new Map(), inserts: [],
     levels: [], surveyData: [], surveyRaw: [],
-    mawariken: [], keisantenFlg: false
+    mawariken: [], keisantenFlg: false, comments: []
   };
   let section = null;
   let inBlockPts = false, inPlinePts = false;
@@ -480,7 +480,8 @@ function parseTrc(text) {
         trc.points.push({ name: f[0], x: num(f[1]), y: num(f[2]),
                           notDisp: parseInt(f[3], 10) || 0,
                           sketch: parseInt(f[4], 10) || 0,
-                          del: parseInt(f[5], 10) || 0 });
+                          del: parseInt(f[5], 10) || 0,
+                          yoten: parseInt(f[6], 10) || 0 });
         break;
       case "*Line-Section*":
         // Name(0),Layer(1),pnA(2),pnB(3),delFLG(4),SketchFLG(5),Style(6)
@@ -495,6 +496,7 @@ function parseTrc(text) {
                            fill: parseInt(f[5], 10) || 0,
                            del: parseInt(f[6], 10) || 0,
                            sketch: parseInt(f[7], 10) || 0,
+                           pointName: (f[8] || "").trim(),
                            photo: parseInt(f[9], 10) || 0 });
         break;
       case "*Moji-Section*":
@@ -539,6 +541,13 @@ function parseTrc(text) {
           const input = (f[1] || "").trim();
           const unable = f.length >= 4 ? /true/i.test(f[3] || "") : (input === "");
           trc.mawariken.push({ kyokai: (f[0] || "").trim(), input, unable });
+        }
+        break;
+      case "*Comment-Section*":
+        // SortNum(0),Check(1),全文(2),改行入りテキスト(3, |区切り),順序(4)
+        if (f.length >= 4) {
+          trc.comments.push({ sort: parseInt(f[0], 10) || 0, check: /true/i.test(f[1] || ""),
+                              text: (f[3] || f[2] || "") });
         }
         break;
     }
@@ -1291,121 +1300,244 @@ async function handleFile(file) {
 //   座標は (値 - 最小) * 1000 (m→mm)。レイヤー先頭文字 K→KYO-0/R→KYO/H→TATEMONO/他→COUI
 // ===========================================================================
 const DXF_SCALE = 1000;
+const DXF_BOUNDARY_RADIUS = 0.025; // _BoundaryDiameter(50) / 2000
+const DXF_SKETCH_SYMBOL = "_";     // _Project.SketchSymbol 既定
 
-const DXF_PREAMBLE = [
-  "0","SECTION","2","HEADER",
-  "9","$ACADVER","1","AC1009",
-  "9","$INSBASE","10","0.0","20","0.0","30","0.0",
-  "9","$PDMODE","70","3",
-  "9","$PDSIZE","40","250.0",
-  "0","ENDSEC",
-  "0","SECTION","2","TABLES",
-  "0","TABLE","2","LTYPE","70","3",
-  "0","LTYPE","2","CONTINUOUS","70","0","3","Solid line","72","65","73","0","40","0.0",
-  "0","LTYPE","2","DASHED","70","0","3","Dashed","72","65","73","2","40","0.75","49","0.5","49","-0.25",
-  "0","LTYPE","2","HIDDEN","70","0","3","Hidden","72","65","73","2","40","0.45","49","0.25","49","-0.2",
-  "0","ENDTAB",
-  "0","TABLE","2","LAYER","70","6",
-  "0","LAYER","2","0","70","0","62","7","6","CONTINUOUS",
-  "0","LAYER","2","KYO-0","70","0","62","4","6","CONTINUOUS",
-  "0","LAYER","2","KYO","70","0","62","4","6","CONTINUOUS",
-  "0","LAYER","2","TATEMONO","70","0","62","3","6","CONTINUOUS",
-  "0","LAYER","2","COUI","70","0","62","2","6","CONTINUOUS",
-  "0","LAYER","2","KYOMOJI","70","0","62","1","6","CONTINUOUS",
-  "0","ENDTAB",
-  "0","TABLE","2","STYLE","70","1",
-  "0","STYLE","2","STANDARD","70","0","40","0.0","41","1.0","50","0.0","71","0","42","2.5","3","txt","4","",
-  "0","ENDTAB",
-  "0","ENDSEC"
+// レイヤーコード(先頭1文字) → DXF画層 （cad-trcad frmTrCAD DXF出力の振り分けを移植）
+//   K=境界 S=スケッチ F=フリー R=道路 H=家屋 G=外構 I=隣接 Q=予備 L=レベル
+//   D=電柱 Z=更地 B=設備 T=既存家屋 M=家屋 Y=道路(L側溝) U=ブロック
+function dxfLineLayer(layer) {
+  switch ((layer || "").charAt(0)) {
+    case "D": return "DENCHU";
+    case "R": return "KYO";
+    case "H": return "TATEMONO";
+    case "T": return "SETUBI";
+    case "U": return "SETUBI2";
+    case "I": return "TATEMONO2";
+    case "G": return "COUI";
+    case "Q": return "COUZOU";
+    case "Y": return "KYO";
+    default:  return "COUI";
+  }
+}
+function dxfCircleLayer(layer) {
+  switch ((layer || "").charAt(0)) {
+    case "D": return "DENCHU";
+    case "T": case "B": return "SETUBI";
+    case "U": return "SETUBI2";
+    default:  return "COUI";
+  }
+}
+function dxfMojiLayer(layer) {
+  switch ((layer || "").charAt(0)) {
+    case "D": return "DENCHU";
+    case "K": return "KYO-0";
+    case "R": return "KYO";
+    case "H": return "TATEMONO";
+    case "Y": return "KYO";
+    case "B": return "SETUBI";
+    case "Z": return "COUZOU";
+    case "U": return "COUI";
+    case "T": return "TATEMONO";
+    case "M": return "TATEMONO2";
+    case "S": return "RED";
+    case "L": return "REBERU";
+    default:  return "COUI";
+  }
+}
+function dxfInsertLayer(layer) {
+  switch ((layer || "").charAt(0)) {
+    case "D": return "DENCHU";
+    case "K": return "KYO-0";
+    case "R": return "KYO";
+    case "H": return "TATEMONO";
+    case "T": return "SETUBI";
+    case "U": return "SETUBI2";
+    default:  return "COUI";
+  }
+}
+
+// DXF ヘッダ / テーブル （trcad の画層を網羅）
+const DXF_LAYER_TABLE = [
+  ["0","7"], ["DENCHU","6"], ["KYO-0","4"], ["KYO","4"], ["TATEMONO","3"],
+  ["TATEMONO2","3"], ["SETUBI","5"], ["SETUBI2","5"], ["COUI","2"], ["COUZOU","2"],
+  ["KYOMOJI","1"], ["RED","1"], ["REBERU","1"], ["UEKOMI","8"], ["TEXT","7"]
+];
+const DXF_LTYPE_TABLE = [
+  ["CONTINUOUS","Solid line",[]],
+  ["HIDDEN-2","Hidden",[0.45,-0.2]],
+  ["DASHED-2","Dashed",[0.5,-0.25]],
+  ["DASHED-4","Dashed long",[1.0,-0.5]],
 ];
 
-function dxfLayerOf(layer) {
-  const c = (layer || "").charAt(0).toUpperCase();
-  if (c === "K") return "KYO-0";
-  if (c === "R") return "KYO";
-  if (c === "H") return "TATEMONO";
-  return "COUI";
-}
-
-function buildDxf(body) {
-  const all = DXF_PREAMBLE.concat(
-    ["0","SECTION","2","ENTITIES"], body, ["0","ENDSEC","0","EOF"]
-  );
-  return all.join("\r\n") + "\r\n";
-}
-
-function pushPolyline(body, h, pts, layer, closed) {
-  body.push("0","POLYLINE","8",layer,"5",h(),"66","1","70",closed ? "1" : "0",
-            "10","0.0","20","0.0","30","0.0");
-  for (const v of pts) {
-    body.push("0","VERTEX","8",layer,"5",h(),"10",v.x,"20",v.y,"30","0.0");
+function dxfHeaderTables() {
+  const a = [
+    "0","SECTION","2","HEADER",
+    "9","$ACADVER","1","AC1009",
+    "9","$INSBASE","10","0.0","20","0.0","30","0.0",
+    "9","$PDMODE","70","3",
+    "9","$PDSIZE","40","250.0",
+    "0","ENDSEC",
+    "0","SECTION","2","TABLES",
+    "0","TABLE","2","LTYPE","70",String(DXF_LTYPE_TABLE.length),
+  ];
+  for (const [nm, desc, pat] of DXF_LTYPE_TABLE) {
+    a.push("0","LTYPE","2",nm,"70","0","3",desc,"72","65","73",String(pat.length),
+           "40",String(pat.reduce((s, v) => s + Math.abs(v), 0).toFixed(3)));
+    for (const v of pat) a.push("49",String(v));
   }
-  body.push("0","SEQEND","8",layer,"5",h());
+  a.push("0","ENDTAB","0","TABLE","2","LAYER","70",String(DXF_LAYER_TABLE.length));
+  for (const [nm, col] of DXF_LAYER_TABLE) {
+    a.push("0","LAYER","2",nm,"70","0","62",col,"6","CONTINUOUS");
+  }
+  a.push("0","ENDTAB",
+    "0","TABLE","2","STYLE","70","2",
+    "0","STYLE","2","STANDARD","70","0","40","0.0","41","1.0","50","0.0","71","0","42","2.5","3","txt","4","",
+    "0","STYLE","2","MSPGothic","70","0","40","0.0","41","1.0","50","0.0","71","0","42","2.5","3","msgothic.ttc","4","",
+    "0","ENDTAB","0","ENDSEC");
+  return a;
 }
 
 function trcToDxf(trc) {
+  // 座標基準: 表示点 + 非削除線の端点 から最小値-3 （cad-trcad と同じ）
   let minX = Infinity, minY = Infinity;
   const ext = (x, y) => { if (x < minX) minX = x; if (y < minY) minY = y; };
-  for (const p of trc.points) ext(p.x, p.y);
-  for (const c of trc.circles) ext(c.x - c.r, c.y - c.r);
-  for (const m of trc.mojis) ext(m.x, m.y);
-  for (const hd of trc.hedges) { ext(hd.x1, hd.y1); ext(hd.x2, hd.y2); }
-  for (const pl of trc.plines) for (const v of pl.pts) ext(v.x, v.y);
-  for (const ins of trc.inserts) {
-    const blk = trc.blocks.get(ins.block);
-    if (blk) for (const v of blk.pts) ext(v.x + ins.x, v.y + ins.y);
-  }
-  if (!isFinite(minX)) { minX = 0; minY = 0; }
-  const X = (x) => ((x - minX) * DXF_SCALE).toFixed(3);
-  const Y = (y) => ((y - minY) * DXF_SCALE).toFixed(3);
-
-  let cnt = 256;
-  const h = () => (cnt++).toString(16).toUpperCase();
-  const body = [];
-
-  for (const p of trc.points) {
-    if (p.notDisp) continue;
-    body.push("0","POINT","8","0","5",h(),"10",X(p.x),"20",Y(p.y),"30","0.0");
-    if (p.name) {
-      body.push("0","TEXT","8","0","5",h(),
-        "10",((p.x - minX) * DXF_SCALE - (150 + 250 * (p.name.length - 1))).toFixed(3),
-        "20",((p.y - minY) * DXF_SCALE + 300).toFixed(3),"30","0.0",
-        "40","500.0","1",p.name,"7","STANDARD");
-    }
-  }
+  for (const p of trc.points) if (!p.notDisp) ext(p.x, p.y);
   for (const ln of trc.lines) {
     if (ln.del) continue;
     const a = trc.pointMap.get(ln.pnA), b = trc.pointMap.get(ln.pnB);
+    if (a) ext(a.x, a.y); if (b) ext(b.x, b.y);
+  }
+  if (!isFinite(minX)) { minX = 3; minY = 3; }
+  minX -= 3; minY -= 3;
+  const X = (x) => ((x - minX) * DXF_SCALE).toFixed(3);
+  const Y = (y) => ((y - minY) * DXF_SCALE).toFixed(3);
+
+  const ent = [];
+  const blocks = []; // BLOCKS セクション用 {name, lines:[[x1,y1,x2,y2]]}
+
+  // 点（＋点名 TEXT）
+  for (const p of trc.points) {
+    if ((p.notDisp || p.sketch) && !p.yoten) continue;
+    if (!p.name) continue;
+    if (p.name.charAt(0).toUpperCase() === DXF_SKETCH_SYMBOL) continue;
+    ent.push("0","POINT","8","0","10",X(p.x),"20",Y(p.y),"30","0.0");
+    ent.push("0","TEXT","8","0",
+      "10",((p.x - minX) * DXF_SCALE - (150 + 250 * (p.name.length - 1))).toFixed(3),
+      "20",((p.y - minY) * DXF_SCALE + 300).toFixed(3),"30","0.0",
+      "40","500.0","1",p.name,"7","Standard");
+  }
+
+  // 線（境界K/スケッチS/レベルL は出力しない）
+  for (const ln of trc.lines) {
+    if (ln.del || ln.sketch) continue;
+    const c0 = (ln.layer || "").charAt(0);
+    if (c0 === "S" || c0 === "K" || c0 === "L") continue;
+    const a = trc.pointMap.get(ln.pnA), b = trc.pointMap.get(ln.pnB);
     if (!a || !b) continue;
-    body.push("0","LINE","8",dxfLayerOf(ln.layer),"5",h());
-    if (ln.style === 2) body.push("6","DASHED");
-    body.push("10",X(a.x),"20",Y(a.y),"30","0.0","11",X(b.x),"21",Y(b.y),"31","0.0");
+    ent.push("0","LINE","8",dxfLineLayer(ln.layer));
+    if (ln.style === 1) ent.push("6","HIDDEN-2");
+    else if (ln.style === 2) ent.push("6","DASHED-2");
+    else if (ln.style === 3) ent.push("6","DASHED-4");
+    ent.push("10",X(a.x),"20",Y(a.y),"30","0.0","11",X(b.x),"21",Y(b.y),"31","0.0");
   }
+
+  // 円（境界K・スケッチ除外。境界点の塗り●は LWPOLYLINE）
   for (const c of trc.circles) {
-    if (c.del) continue;
-    body.push("0","CIRCLE","8",dxfLayerOf(c.layer),"5",h(),
-      "10",X(c.x),"20",Y(c.y),"30","0.0","40",(c.r * DXF_SCALE).toFixed(3));
+    if (c.del || c.sketch) continue;
+    const c0 = (c.layer || "").charAt(0);
+    if (c0 === "S" || c0 === "K") continue;
+    if (Math.abs(c.r - DXF_BOUNDARY_RADIUS) < 1e-6 && c.fill === 1) {
+      const cx = (c.x - minX) * DXF_SCALE, cy = (c.y - minY) * DXF_SCALE;
+      const lay = (c.pointName || "").charAt(0).toUpperCase() === "K" ? "KYOMOJI" : "KYO";
+      ent.push("0","LWPOLYLINE","8",lay,"90","2","70","1","43","75.0",
+        "10",(cx - 37.5).toFixed(3),"20",cy.toFixed(3),"42","1.0",
+        "10",(cx + 37.5).toFixed(3),"20",cy.toFixed(3),"42","1.0");
+    } else {
+      ent.push("0","CIRCLE","8",dxfCircleLayer(c.layer),
+        "10",X(c.x),"20",Y(c.y),"30","0.0","40",(c.r * DXF_SCALE).toFixed(3));
+    }
   }
+
+  // 文字（スケッチS・レベルL 除外。空文字も trcad は出力する）
   for (const m of trc.mojis) {
-    if (m.del || !m.text) continue;
-    body.push("0","TEXT","8","0","5",h(),"10",X(m.x),"20",Y(m.y),"30","0.0",
-      "40","200.0","1",m.text,"7","STANDARD");
-    if (m.angle) body.push("50",(360 - m.angle).toString());
+    if (m.del || m.sketch) continue;
+    const c0 = (m.layer || "").charAt(0);
+    if (c0 === "S" || c0 === "L") continue;
+    if (m.text == null) m.text = "";
+    const lay = dxfMojiLayer(m.layer);
+    const rows = String(m.text).split(/\r?\n/);
+    if (rows.length > 1) {
+      // 複数行: 1行ずつ TEXT（座標は近似。GDI実測に依存する部分は再現不可）
+      const LS = 265;
+      rows.forEach((row, i) => {
+        ent.push("0","TEXT","8",lay,
+          "10",X(m.x),"20",((m.y - minY) * DXF_SCALE + (rows.length * LS) / 2 - i * LS - 185).toFixed(3),
+          "30","0.0","40","200.0","1",row.trim(),"72","0","7","MSPGothic");
+      });
+    } else {
+      ent.push("0","TEXT","8",lay,
+        "10",X(m.x),"20",Y(m.y),"30","0.0","40","200.0","1",m.text);
+      if (m.angle) ent.push("50",String(360 - m.angle));
+      ent.push("72","4","11",X(m.x),"21",Y(m.y),"7","MSPGothic");
+    }
   }
-  for (const hd of trc.hedges) {
-    body.push("0","LINE","8","TATEMONO","5",h(),
-      "10",X(hd.x1),"20",Y(hd.y1),"30","0.0","11",X(hd.x2),"21",Y(hd.y2),"31","0.0");
-  }
-  for (const pl of trc.plines) {
-    if (pl.pts.length < 2) continue;
-    pushPolyline(body, h, pl.pts.map(v => ({ x: X(v.x), y: Y(v.y) })), "COUI", false);
-  }
+
+  // インサート（ブロック参照）
   for (const ins of trc.inserts) {
+    if (ins.del || ins.sketch) continue;
     const blk = trc.blocks.get(ins.block);
-    if (!blk || blk.pts.length < 2) continue;
-    pushPolyline(body, h, blk.pts.map(v => ({ x: X(v.x + ins.x), y: Y(v.y + ins.y) })), "0", false);
+    if (!blk || blk.pts.length === 0) continue;
+    const bname = ins.block === "Uekomi" ? "KABU1" : ins.block;
+    ent.push("0","INSERT","8",dxfInsertLayer(ins.layer),"2",bname,
+      "10",X(ins.x),"20",Y(ins.y),"30","0.0");
+    if (ins.angle) ent.push("50",String(-ins.angle));
   }
-  return buildDxf(body);
+
+  // ポリライン → ブロック定義＋INSERT （cad-trcad と同じ構造）
+  for (const pl of trc.plines) {
+    if (pl.del || pl.pts.length < 2) continue;
+    if ((pl.name || "").indexOf("PMADO") === 0) continue;
+    const lines = [];
+    for (let i = 1; i < pl.pts.length; i++) {
+      const a = pl.pts[i - 1], b = pl.pts[i];
+      lines.push([((a.x - minX) * DXF_SCALE).toFixed(3), ((a.y - minY) * DXF_SCALE).toFixed(3),
+                  ((b.x - minX) * DXF_SCALE).toFixed(3), ((b.y - minY) * DXF_SCALE).toFixed(3)]);
+    }
+    blocks.push({ name: pl.name, lines });
+    ent.push("0","INSERT","8","0","2",pl.name,"10","0.0","20","0.0","30","0.0");
+  }
+
+  // コメント → MTEXT （Check=True を SortNum 順。位置は近似）
+  const comments = trc.comments.filter(c => c.check).sort((a, b) => a.sort - b.sort);
+  if (comments.length) {
+    let maxX = -Infinity, maxY = -Infinity;
+    for (const p of trc.points) if (!p.notDisp) { if (p.x > maxX) maxX = p.x; if (p.y > maxY) maxY = p.y; }
+    if (!isFinite(maxX)) { maxX = minX; maxY = minY; }
+    let posY = (maxY - minY) * DXF_SCALE;
+    const posX = (maxX - minX) * DXF_SCALE + 3000;
+    for (const c of comments) {
+      const mtext = String(c.text).replace(/\|/g, "\\P");
+      ent.push("0","MTEXT","8","TEXT","10",posX.toFixed(3),"20",posY.toFixed(3),"30","0.0",
+        "40","250.0","1",mtext);
+      posY -= (String(c.text).split("|").length * 250 + 800);
+    }
+  }
+
+  // 組み立て: HEADER/TABLES + BLOCKS + ENTITIES + EOF
+  const out = dxfHeaderTables();
+  out.push("0","SECTION","2","BLOCKS");
+  for (const blk of blocks) {
+    out.push("0","BLOCK","8","0","2",blk.name,"70","0","10","0.0","20","0.0","30","0.0","3",blk.name);
+    for (const [x1, y1, x2, y2] of blk.lines) {
+      out.push("0","LINE","8","0","10",x1,"20",y1,"30","0.0","11",x2,"21",y2,"31","0.0");
+    }
+    out.push("0","ENDBLK","8","0");
+  }
+  out.push("0","ENDSEC","0","SECTION","2","ENTITIES");
+  out.push(...ent);
+  out.push("0","ENDSEC","0","EOF");
+  return out.join("\r\n") + "\r\n";
 }
 
 function entitiesToDxf(entities) {
@@ -1445,7 +1577,11 @@ function entitiesToDxf(entities) {
         break;
     }
   }
-  return buildDxf(body);
+  const out = dxfHeaderTables();
+  out.push("0","SECTION","2","ENTITIES");
+  out.push(...body);
+  out.push("0","ENDSEC","0","EOF");
+  return out.join("\r\n") + "\r\n";
 }
 
 function saveDxf() {
