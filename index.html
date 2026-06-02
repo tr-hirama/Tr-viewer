@@ -1584,13 +1584,222 @@ function entitiesToDxf(entities) {
   return out.join("\r\n") + "\r\n";
 }
 
-function saveDxf() {
+// ===========================================================================
+// DXF 出力 (AC1015 / AutoCAD 2000) — cad-trcad の DXF 出力に構造まで合わせる版
+//   雛形 dxf-template.txt (HEADER/CLASSES/TABLES/BLOCKS/OBJECTS) を読み込み、
+//   ハンドル・サブクラスマーカー付きでエンティティを差し込む。
+//   座標は (値-最小)*1000。小数は toPrecision(15) で TRC が保持する精度に合わせる
+//   (trcad の .NET Decimal 内部精度の末尾桁は TRC に情報が無いため再現不可)。
+// ===========================================================================
+let _dxfTemplate = null;
+async function loadDxfTemplate() {
+  if (_dxfTemplate) return _dxfTemplate;
+  const res = await fetch("dxf-template.txt");
+  if (!res.ok) throw new Error("dxf-template.txt 読込失敗 (HTTP " + res.status + ")");
+  const txt = await res.text();
+  const T = {};
+  const parts = txt.split(/@@@([A-Z0-9]+)@@@\r?\n/);
+  for (let i = 1; i < parts.length; i += 2) T[parts[i]] = parts[i + 1];
+  _dxfTemplate = T;
+  return T;
+}
+
+// (値) を有効15桁に丸めた数値文字列に（double ノイズ桁を除去し trcad 前方桁に一致）
+function dxfNum(v) {
+  if (!isFinite(v)) return "0";
+  const n = Number(v.toPrecision(15));
+  return Object.is(n, -0) ? "0" : String(n);
+}
+
+async function trcToDxfFull(trc) {
+  const T = await loadDxfTemplate();
+
+  // 座標基準: 表示点 + 非削除線の端点 の最小値 - 3
+  let minX = Infinity, minY = Infinity;
+  for (const p of trc.points) if (!p.notDisp) { if (p.x < minX) minX = p.x; if (p.y < minY) minY = p.y; }
+  for (const ln of trc.lines) {
+    if (ln.del) continue;
+    const a = trc.pointMap.get(ln.pnA), b = trc.pointMap.get(ln.pnB);
+    if (a) { if (a.x < minX) minX = a.x; if (a.y < minY) minY = a.y; }
+    if (b) { if (b.x < minX) minX = b.x; if (b.y < minY) minY = b.y; }
+  }
+  if (!isFinite(minX)) { minX = 3; minY = 3; }
+  minX -= 3; minY -= 3;
+  const X = (x) => dxfNum((x - minX) * 1000);
+  const Y = (y) => dxfNum((y - minY) * 1000);
+
+  let cnt = 300;
+  const H = () => String(cnt++);
+
+  const out = [];
+  const push = (...a) => { for (const v of a) out.push(v); };
+  const pushTmpl = (s) => { for (const ln of (s || "").replace(/\r?\n$/, "").split(/\r?\n/)) out.push(ln); };
+
+  // 出力対象のポリライン/ブロック
+  const plines = trc.plines.filter(p => !p.del && p.pts.length >= 2 && (p.name || "").indexOf("PMADO") !== 0);
+  const usedBlocks = [];
+  const seenBlk = new Set();
+  for (const ins of trc.inserts) {
+    if (ins.del || ins.sketch) continue;
+    const blk = trc.blocks.get(ins.block);
+    if (blk && blk.pts.length && !seenBlk.has(ins.block)) { seenBlk.add(ins.block); usedBlocks.push(blk); }
+  }
+
+  // 1) HEADER / CLASSES（雛形・完結）
+  pushTmpl(T.HEADERSECTION00);
+  pushTmpl(T.CLASSESSECTION00);
+
+  // 2) TABLES（雛形は BLOCK_RECORD テーブルを開いた状態で終了）→ 動的 BLOCK_RECORD
+  pushTmpl(T.TABLESSECTION00);
+  for (const pl of plines) push("0", "BLOCK_RECORD", "5", H(), "100", "AcDbSymbolTableRecord", "100", "AcDbBlockTableRecord", "2", pl.name);
+  for (const blk of usedBlocks) push("0", "BLOCK_RECORD", "5", H(), "100", "AcDbSymbolTableRecord", "100", "AcDbBlockTableRecord", "2", blk.name);
+  push("0", "ENDTAB", "0", "ENDSEC");
+
+  // 3) BLOCKS（雛形は *Paper_Space まで）→ 動的ブロック
+  pushTmpl(T.BLOCKSSECTION00);
+  const blockDef = (name, segs) => {
+    push("0", "BLOCK", "5", H(), "100", "AcDbEntity", "8", "0", "100", "AcDbBlockBegin",
+      "2", name, "70", "0", "10", "0.0", "20", "0.0", "30", "0.0", "3", name, "1", "");
+    for (const [x1, y1, x2, y2] of segs)
+      push("0", "LINE", "5", H(), "100", "AcDbEntity", "8", "0", "100", "AcDbLine",
+        "10", x1, "20", y1, "30", "0.0", "11", x2, "21", y2, "31", "0.0");
+    push("0", "ENDBLK", "5", H(), "100", "AcDbEntity", "8", "0", "100", "AcDbBlockEnd");
+  };
+  for (const pl of plines) {
+    const segs = [];
+    for (let i = 1; i < pl.pts.length; i++)
+      segs.push([X(pl.pts[i - 1].x), Y(pl.pts[i - 1].y), X(pl.pts[i].x), Y(pl.pts[i].y)]);
+    blockDef(pl.name, segs);
+  }
+  for (const blk of usedBlocks) {
+    const segs = [];
+    for (let i = 1; i < blk.pts.length; i++)
+      segs.push([dxfNum(blk.pts[i - 1].x * 1000), dxfNum(blk.pts[i - 1].y * 1000),
+                 dxfNum(blk.pts[i].x * 1000), dxfNum(blk.pts[i].y * 1000)]);
+    blockDef(blk.name, segs);
+  }
+  push("0", "ENDSEC");
+
+  // 4) ENTITIES
+  push("0", "SECTION", "2", "ENTITIES");
+
+  for (const p of trc.points) {
+    if ((p.notDisp || p.sketch) && !p.yoten) continue;
+    if (!p.name) continue;
+    if (p.name.charAt(0).toUpperCase() === DXF_SKETCH_SYMBOL) continue;
+    push("0", "POINT", "5", H(), "100", "AcDbEntity", "8", "0", "100", "AcDbPoint",
+      "10", X(p.x), "20", Y(p.y), "30", "0.0");
+    push("0", "TEXT", "5", H(), "100", "AcDbEntity", "8", "0", "100", "AcDbText",
+      "10", dxfNum((p.x - minX) * 1000 - (150 + 250 * (p.name.length - 1))),
+      "20", dxfNum((p.y - minY) * 1000 + 300), "30", "0.0",
+      "40", "500.0", "1", p.name, "7", "Standard", "100", "AcDbText");
+  }
+
+  for (const ln of trc.lines) {
+    if (ln.del || ln.sketch) continue;
+    const c0 = (ln.layer || "").charAt(0);
+    if (c0 === "S" || c0 === "K" || c0 === "L") continue;
+    const a = trc.pointMap.get(ln.pnA), b = trc.pointMap.get(ln.pnB);
+    if (!a || !b) continue;
+    push("0", "LINE", "5", H(), "100", "AcDbEntity", "8", dxfLineLayer(ln.layer));
+    if (ln.style === 1) push("6", "HIDDEN-2");
+    else if (ln.style === 2) push("6", "DASHED-2");
+    else if (ln.style === 3) push("6", "DASHED-4");
+    push("100", "AcDbLine", "10", X(a.x), "20", Y(a.y), "30", "0.0", "11", X(b.x), "21", Y(b.y), "31", "0.0");
+  }
+
+  for (const c of trc.circles) {
+    if (c.del || c.sketch) continue;
+    const c0 = (c.layer || "").charAt(0);
+    if (c0 === "S" || c0 === "K") continue;
+    if (Math.abs(c.r - DXF_BOUNDARY_RADIUS) < 1e-6 && c.fill === 1) {
+      const cx = (c.x - minX) * 1000, cy = (c.y - minY) * 1000;
+      const lay = (c.pointName || "").charAt(0).toUpperCase() === "K" ? "KYOMOJI" : "KYO";
+      push("0", "LWPOLYLINE", "5", H(), "100", "AcDbEntity", "8", lay, "100", "AcDbPolyline",
+        "90", "2", "70", "1", "43", "75.0",
+        "10", dxfNum(cx - 37.5), "20", dxfNum(cy), "42", "1.0",
+        "10", dxfNum(cx + 37.5), "20", dxfNum(cy), "42", "1.0");
+    } else {
+      push("0", "CIRCLE", "5", H(), "100", "AcDbEntity", "8", dxfCircleLayer(c.layer), "100", "AcDbCircle",
+        "10", X(c.x), "20", Y(c.y), "30", "0.0", "40", dxfNum(c.r * 1000));
+    }
+  }
+
+  for (const m of trc.mojis) {
+    if (m.del || m.sketch) continue;
+    const c0 = (m.layer || "").charAt(0);
+    if (c0 === "S" || c0 === "L") continue;
+    if (m.text == null) m.text = "";
+    const lay = dxfMojiLayer(m.layer);
+    const rows = String(m.text).split(/\r?\n/);
+    if (rows.length > 1) {
+      const LS = 265;
+      rows.forEach((row, i) => {
+        push("0", "TEXT", "5", H(), "100", "AcDbEntity", "8", lay, "100", "AcDbText",
+          "10", X(m.x), "20", dxfNum((m.y - minY) * 1000 + (rows.length * LS) / 2 - i * LS - 185),
+          "30", "0.0", "40", "200.0", "1", row.trim(), "72", "0", "7", "MSPGothic", "100", "AcDbText");
+      });
+    } else {
+      push("0", "TEXT", "5", H(), "100", "AcDbEntity", "8", lay, "100", "AcDbText",
+        "10", X(m.x), "20", Y(m.y), "30", "0.0", "40", "200.0", "1", m.text);
+      if (m.angle) push("50", String(360 - m.angle));
+      push("72", "4", "11", X(m.x), "21", Y(m.y), "7", "MSPGothic", "100", "AcDbText");
+    }
+  }
+
+  for (const ins of trc.inserts) {
+    if (ins.del || ins.sketch) continue;
+    const blk = trc.blocks.get(ins.block);
+    if (!blk || blk.pts.length === 0) continue;
+    const bname = ins.block === "Uekomi" ? "KABU1" : ins.block;
+    push("0", "INSERT", "5", H(), "100", "AcDbEntity", "8", dxfInsertLayer(ins.layer), "100", "AcDbBlockReference",
+      "2", bname, "10", X(ins.x), "20", Y(ins.y), "30", "0.0");
+    if (ins.angle) push("50", String(-ins.angle));
+  }
+
+  for (const pl of plines) {
+    push("0", "INSERT", "5", H(), "100", "AcDbEntity", "8", "0", "100", "AcDbBlockReference",
+      "2", pl.name, "10", "0.0", "20", "0.0", "30", "0.0");
+  }
+
+  // コメント → MTEXT
+  const comments = trc.comments.filter(c => c.check).sort((a, b) => a.sort - b.sort);
+  if (comments.length) {
+    let mxX = -Infinity, mxY = -Infinity;
+    for (const p of trc.points) if (!p.notDisp) { if (p.x > mxX) mxX = p.x; if (p.y > mxY) mxY = p.y; }
+    if (!isFinite(mxX)) { mxX = minX; mxY = minY; }
+    let posY = (mxY - minY) * 1000;
+    const posX = (mxX - minX) * 1000 + 3000;
+    for (const c of comments) {
+      push("0", "MTEXT", "5", H(), "100", "AcDbEntity", "8", "TEXT", "100", "AcDbMText",
+        "10", dxfNum(posX), "20", dxfNum(posY), "30", "0.0", "40", "250.0",
+        "1", String(c.text).replace(/\|/g, "\\P"));
+      posY -= (String(c.text).split("|").length * 250 + 800);
+    }
+  }
+
+  push("0", "ENDSEC");
+
+  // 5) OBJECTS（雛形・完結）+ EOF
+  pushTmpl(T.OBJECTSSECTION00);
+  push("0", "EOF");
+
+  return out.join("\r\n") + "\r\n";
+}
+
+async function saveDxf() {
   if (!hasData) return;
   const base = (currentName || "drawing").replace(/\.[^.]*$/, "");
   let text;
-  if (mode === "trc") text = trcToDxf(trc);
-  else if (mode === "dxf") text = entitiesToDxf(entities);
-  else return;
+  if (mode === "dxf") { text = entitiesToDxf(entities); }
+  else if (mode === "trc") {
+    try {
+      text = await trcToDxfFull(trc);            // AC1015 (trcad 構造準拠)
+    } catch (e) {
+      console.warn("AC1015 雛形を読めないため R12 で出力します:", e);
+      text = trcToDxf(trc);                      // 雛形が無い場合は軽量 R12 にフォールバック
+    }
+  } else { return; }
   downloadBlob(new Blob([text], { type: "application/dxf" }), base + ".dxf");
 }
 
