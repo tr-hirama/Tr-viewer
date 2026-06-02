@@ -1135,18 +1135,14 @@ function levelHtml() {
 function overviewHtml() {
   const o = trc.overview || {};
   const rows = [
-    ["案件番号", o.caseNo],
-    ["担当者", o.name ? (o.name + (o.account ? `（${o.account}）` : "")) : (o.account || "")],
-    ["Tr-CAD バージョン", o.version],
+    ["概要コード", o.caseNo],
     ["日付", o.date],
-    ["営業所", o.office],
     ["邸名", o.teiName],
     ["住所", o.address],
-    ["緯度・経度", (o.lat || o.lng)
-      ? `${esc(o.lat)}, ${esc(o.lng)} <a href="https://www.google.com/maps?q=${encodeURIComponent((o.lat || "") + "," + (o.lng || ""))}" target="_blank" rel="noopener">地図</a>`
+    ["経度・緯度", (o.lat || o.lng)
+      ? `${esc(o.lng)}, ${esc(o.lat)} <a href="https://www.google.com/maps?q=${encodeURIComponent((o.lat || "") + "," + (o.lng || ""))}" target="_blank" rel="noopener">地図</a>`
       : "", true],
-    ["PC名", o.pc],
-    ["保存日時", o.savedAt],
+    ["依頼会社", o.office],
   ];
   const has = rows.some(r => (r[1] != null && String(r[1]).trim() !== ""));
   if (!has) return '<div class="empty">概要データなし</div>';
