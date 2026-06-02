@@ -429,7 +429,7 @@ function parseTrc(text) {
     points: [], lines: [], circles: [], mojis: [],
     hedges: [], plines: [], blocks: new Map(), inserts: [],
     levels: [], surveyData: [], surveyRaw: [],
-    mawariken: [], keisantenFlg: false, comments: []
+    mawariken: [], keisantenFlg: false, comments: [], overview: {}
   };
   let section = null;
   let inBlockPts = false, inPlinePts = false;
@@ -550,6 +550,20 @@ function parseTrc(text) {
                               text: (f[3] || f[2] || "") });
         }
         break;
+      case "*Overview-Section*": {
+        // 1行目: 案件番号(0),担当ｱｶｳﾝﾄ(1),担当氏名(2),Ver(3),日付(4),営業所(5),邸名(6),住所(7),緯度(8),経度(9)
+        // 2行目: ,PC名(1),保存日時(2)
+        const o = trc.overview;
+        const v = (s) => (s == null ? "" : String(s)).trim();
+        if (f.length >= 8) {
+          o.caseNo = v(f[0]); o.account = v(f[1]); o.name = v(f[2]); o.version = v(f[3]);
+          o.date = v(f[4]); o.office = v(f[5]); o.teiName = v(f[6]); o.address = v(f[7]);
+          o.lat = v(f[8]); o.lng = v(f[9]);
+        } else if (v(f[0]) === "" && f.length >= 3) {
+          o.pc = v(f[1]); o.savedAt = v(f[2]);
+        }
+        break;
+      }
     }
   }
 
@@ -1116,6 +1130,32 @@ function levelHtml() {
 }
 
 // ===========================================================================
+// 概要 — *Overview-Section* の案件メタ情報を表示
+// ===========================================================================
+function overviewHtml() {
+  const o = trc.overview || {};
+  const rows = [
+    ["概要コード", o.caseNo],
+    ["日付", o.date],
+    ["邸名", o.teiName],
+    ["住所", o.address],
+    ["経度・緯度", (o.lat || o.lng)
+      ? `${esc(o.lng)}, ${esc(o.lat)} <a href="https://www.google.com/maps?q=${encodeURIComponent((o.lat || "") + "," + (o.lng || ""))}" target="_blank" rel="noopener">地図</a>`
+      : "", true],
+    ["依頼会社", o.office],
+  ];
+  const has = rows.some(r => (r[1] != null && String(r[1]).trim() !== ""));
+  if (!has) return '<div class="empty">概要データなし</div>';
+  let html = "<table>";
+  for (const [k, val, raw] of rows) {
+    const v = (val == null ? "" : String(val));
+    html += `<tr><td class="l">${esc(k)}</td><td class="l">${raw ? v : esc(v)}</td></tr>`;
+  }
+  html += "</table>";
+  return html;
+}
+
+// ===========================================================================
 // まわりけん（境界一覧）— cad-trcad frmTrCAD.ShowData_dgvMawarikenCheck を移植
 //   境界点 K<n>(n≤300) を K1→K2…→Kmax→K1 と連結し、計算値=隣接間距離(m)。
 //   入力値は *Mawariken-Section* から取得。誤差=|入力-計算|×1000(mm)。
@@ -1200,6 +1240,7 @@ function renderPanel() {
 
   // TRC: 図形 / 測角データ / レベル（水準）を別タブ（別画面）に分離
   const tabs = [
+    { key: "overview", label: "概要" },
     { key: "mawari", label: "まわりけん" },
     { key: "survey", label: "測角データ" },
     { key: "level",  label: "レベル（水準）" },
@@ -1211,7 +1252,8 @@ function renderPanel() {
     html += `<button class="tab${activeTab === t.key ? " active" : ""}" data-tab="${t.key}">${t.label}</button>`;
   }
   html += "</div><div class=\"tabBody\">";
-  if (activeTab === "survey")      html += surveyHtml();
+  if (activeTab === "overview")    html += overviewHtml();
+  else if (activeTab === "survey") html += surveyHtml();
   else if (activeTab === "level")  html += levelHtml();
   else if (activeTab === "mawari") html += mawarikenHtml();
   else if (activeTab === "raw")    html += rawTextHtml();
@@ -1252,7 +1294,7 @@ function loadTrc(parsed, name) {
   trc = parsed;
   entities = [];
   controls.classList.remove("hidden");
-  activeTab = "mawari";
+  activeTab = "overview";
   renderPanel();
   const dispPts = trc.points.filter(p => !p.notDisp).length;
   finishLoad(name, `点 ${dispPts} / 線 ${trc.lines.length} / 円 ${trc.circles.length} / 文字 ${trc.mojis.length}`);
