@@ -1191,11 +1191,11 @@ function renderPanel() {
 
   // TRC: 図形 / 測角データ / レベル（水準）を別タブ（別画面）に分離
   const tabs = [
-    { key: "shape",  label: "図形" },
+    { key: "mawari", label: "まわりけん" },
     { key: "survey", label: "測角データ" },
     { key: "level",  label: "レベル（水準）" },
-    { key: "mawari", label: "まわりけん" },
     { key: "raw",    label: "TRCデータ" },
+    { key: "shape",  label: "図形" },
   ];
   let html = '<div class="tabs">';
   for (const t of tabs) {
@@ -1243,7 +1243,7 @@ function loadTrc(parsed, name) {
   trc = parsed;
   entities = [];
   controls.classList.remove("hidden");
-  activeTab = "shape";
+  activeTab = "mawari";
   renderPanel();
   const dispPts = trc.points.filter(p => !p.notDisp).length;
   finishLoad(name, `点 ${dispPts} / 線 ${trc.lines.length} / 円 ${trc.circles.length} / 文字 ${trc.mojis.length}`);
