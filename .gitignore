@@ -1,6 +1,11 @@
 # 実データ（個別案件の TRC/野帳/Excel 一式。リポジトリには含めない）
 TRCファイル/
 
+# .NET ビルド生成物 (tools/TrcWatcher)
+[Bb]in/
+[Oo]bj/
+*.user
+
 # OS / editor
 Thumbs.db
 Desktop.ini
