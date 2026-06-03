@@ -14,6 +14,8 @@ internal sealed class TrayContext : ApplicationContext
     private readonly System.Windows.Forms.Timer _timer;
     private readonly Dictionary<string, string> _state;
     private readonly string _outPath;
+    private readonly List<string> _logBuffer = new(); // ログ窓を開く前の履歴も保持する
+    private const int LogBufferMax = 5000;
     private LogForm? _logForm;
 
     public TrayContext(Dictionary<string, string> state, string watchPath, string outPath, int intervalSeconds)
@@ -57,6 +59,12 @@ internal sealed class TrayContext : ApplicationContext
 
     private void OnLog(string line, ConsoleColor color)
     {
+        // ログ窓が未オープンでも履歴を失わないようバッファに残す
+        lock (_logBuffer)
+        {
+            _logBuffer.Add(line);
+            if (_logBuffer.Count > LogBufferMax) _logBuffer.RemoveRange(0, _logBuffer.Count - LogBufferMax);
+        }
         _logForm?.Append(line);
         // 重要イベントだけバルーン通知
         if (color == ConsoleColor.Green)
@@ -68,7 +76,12 @@ internal sealed class TrayContext : ApplicationContext
     private void ShowLog()
     {
         if (_logForm is null || _logForm.IsDisposed)
+        {
             _logForm = new LogForm();
+            string[] history;
+            lock (_logBuffer) history = _logBuffer.ToArray();
+            _logForm.SetHistory(history); // 開く前のログをまとめて表示
+        }
         _logForm.Show();
         _logForm.WindowState = FormWindowState.Normal;
         _logForm.BringToFront();
@@ -145,6 +158,15 @@ internal sealed class LogForm : Form
     public void Append(string line)
     {
         if (InvokeRequired) { BeginInvoke(() => Append(line)); return; }
-        _box.AppendText(line + Environment.NewLine);
+        _box.AppendText(line + Environment.NewLine); // AppendText は末尾へスクロールする
+    }
+
+    /// <summary>窓を開く前に蓄積されたログ履歴をまとめて表示する。</summary>
+    public void SetHistory(IReadOnlyList<string> lines)
+    {
+        if (InvokeRequired) { BeginInvoke(() => SetHistory(lines)); return; }
+        _box.Text = lines.Count > 0 ? string.Join(Environment.NewLine, lines) + Environment.NewLine : "";
+        _box.SelectionStart = _box.TextLength;
+        _box.ScrollToCaret();
     }
 }
