@@ -215,6 +215,8 @@
 // ===========================================================================
 // DXF パーサ (ASCII DXF の group-code / value ペアを読み、基本エンティティを抽出)
 // ===========================================================================
+let dxfLayerColors = {};  // レイヤー名 -> ACI 色番号 (group 62)。DXF 描画の ByLayer 解決に使用。
+
 function parseDxf(text) {
   const lines = text.split(/\r\n|\r|\n/);
   const pairs = [];
@@ -222,6 +224,21 @@ function parseDxf(text) {
     const code = parseInt(lines[i].trim(), 10);
     if (Number.isNaN(code)) continue;
     pairs.push([code, lines[i + 1]]);
+  }
+
+  // LAYER テーブルの色 (group 62) を収集。エンティティは多くが ByLayer なので、
+  // 描画時にこの表でレイヤー色へ解決する。
+  dxfLayerColors = {};
+  for (let k = 0; k + 1 < pairs.length; k++) {
+    if (pairs[k][0] === 0 && String(pairs[k][1]).trim() === "LAYER") {
+      let lname = null, lcol = null;
+      for (let m = k + 1; m < pairs.length && pairs[m][0] !== 0; m++) {
+        const c = pairs[m][0], v = String(pairs[m][1]).trim();
+        if (c === 2 && lname === null) lname = v;
+        else if (c === 62) lcol = parseInt(v, 10);
+      }
+      if (lname !== null && lcol !== null) dxfLayerColors[lname] = Math.abs(lcol); // 負値=非表示
+    }
   }
 
   const entities = [];
@@ -263,6 +280,7 @@ function parseDxf(text) {
       else if (code === 70) { e.props.flags = parseInt(val, 10); }
       else if (code === 1)  { e.props.text = raw; }
       else if (code === 8)  { e.props.layer = val; }
+      else if (code === 62) { e.props.color = parseInt(val, 10); }
       i++;
     }
     return e;
@@ -274,6 +292,7 @@ function parseDxf(text) {
       const [code, raw] = pairs[i];
       if (code === 70) e.props.flags = parseInt(raw.trim(), 10);
       if (code === 8) e.props.layer = raw.trim();
+      if (code === 62) e.props.color = parseInt(raw.trim(), 10);
       i++;
     }
     while (i < n) {
@@ -324,6 +343,40 @@ function parseDxf(text) {
   }
 
   return entities;
+}
+
+// --- DXF の色 (AutoCAD Color Index) を RGB へ ---------------------------------
+function hsvToRgb(h, s, v) {
+  h = ((h % 360) + 360) % 360;
+  const c = v * s, x = c * (1 - Math.abs(((h / 60) % 2) - 1)), m = v - c;
+  let r = 0, g = 0, b = 0;
+  if (h < 60) { r = c; g = x; } else if (h < 120) { r = x; g = c; }
+  else if (h < 180) { g = c; b = x; } else if (h < 240) { g = x; b = c; }
+  else if (h < 300) { r = x; b = c; } else { r = c; b = x; }
+  return [Math.round((r + m) * 255), Math.round((g + m) * 255), Math.round((b + m) * 255)];
+}
+// 標準9色は厳密値、10-249 は AutoCAD の 24色相×濃淡構造を近似、250-255 はグレースケール。
+function aciToRgb(aci) {
+  const STD = { 1:[255,0,0], 2:[255,255,0], 3:[0,255,0], 4:[0,255,255],
+                5:[0,0,255], 6:[255,0,255], 7:[255,255,255], 8:[128,128,128], 9:[192,192,192] };
+  let rgb;
+  if (STD[aci]) rgb = STD[aci];
+  else if (aci >= 250 && aci <= 255) { const g = [33,69,104,140,176,211][aci - 250]; rgb = [g,g,g]; }
+  else if (aci >= 10 && aci <= 249) {
+    const i = aci - 10, shade = i % 10;
+    const V = [1,1,0.8,0.8,0.6,0.6,0.5,0.5,0.3,0.3][shade];
+    const S = (shade % 2 === 0) ? 1 : 0.5;
+    rgb = hsvToRgb(Math.floor(i / 10) * 15, S, V);
+  } else rgb = [0,0,0];
+  return "rgb(" + rgb[0] + "," + rgb[1] + "," + rgb[2] + ")";
+}
+// エンティティの表示色を解決: 明示色(62) → 無ければレイヤー色(ByLayer) → 既定黒。
+// ACI 7 (白) は白背景では見えないため黒で描画する。
+function dxfEntityColor(e) {
+  let aci = e.props.color;
+  if (aci == null || aci === 256) aci = dxfLayerColors[e.props.layer]; // 256 = ByLayer
+  if (aci == null || aci === 0 || aci === 7) return "#ffffff";         // 黒背景: 0=ByBlock/既定/7=白 は白
+  return aciToRgb(aci);
 }
 
 // ===========================================================================
@@ -791,17 +844,24 @@ function myFromScreen(sy) { return -(sy - view.oy) / view.scale; }
 function draw() {
   const rect = canvas.getBoundingClientRect();
   ctx.clearRect(0, 0, rect.width, rect.height);
-  if (mode === "trc") drawTrc();
-  else if (mode === "dxf") drawDxf();
+  if (mode === "dxf") {
+    // DXF は CAD と同じく黒背景で表示 (ACI 7/既定色は白で描画)
+    ctx.fillStyle = "#000000";
+    ctx.fillRect(0, 0, rect.width, rect.height);
+    drawDxf();
+  } else if (mode === "trc") {
+    drawTrc();
+  }
 }
 
 function drawDxf() {
-  // cad-trcad と同じく白背景・黒線
+  // 黒背景・レイヤー色 (ByLayer) で描画
   ctx.lineWidth = 1;
-  ctx.strokeStyle = "#000000";
-  ctx.fillStyle = "#000000";
 
   for (const e of entities) {
+    const col = dxfEntityColor(e);
+    ctx.strokeStyle = col;
+    ctx.fillStyle = col;
     ctx.beginPath();
     switch (e.type) {
       case "LINE":
@@ -1316,9 +1376,11 @@ function updatePanelVisibility() {
 // ファイル読み込み
 // ===========================================================================
 function decodeText(buf) {
-  const u8 = new Uint8Array(buf);
-  try { return new TextDecoder("utf-8", { fatal: false }).decode(u8); }
-  catch (e) { return new TextDecoder("shift_jis", { fatal: false }).decode(u8); }
+  // DXF は Shift_JIS (R12) のことが多い。decodeSjis と同じく、
+  // 厳密 UTF-8 として解釈できなければ Shift_JIS とみなす。
+  // ※ fatal:false の UTF-8 は不正バイトでも例外を投げず � に置換してしまい、
+  //   Shift_JIS への切替が効かず文字化けするため fatal:true で判定する。
+  return decodeSjis(new Uint8Array(buf));
 }
 
 function loadDxf(text, name) {
