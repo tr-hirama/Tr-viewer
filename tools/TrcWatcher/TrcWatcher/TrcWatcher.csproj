@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
+    <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
     <Nullable>enable</Nullable>
@@ -9,7 +9,12 @@
     <LangVersion>latest</LangVersion>
     <RootNamespace>TrcWatcher</RootNamespace>
     <AssemblyName>TrcWatcher</AssemblyName>
+    <ApplicationIcon>appicon.ico</ApplicationIcon>
   </PropertyGroup>
+
+  <ItemGroup>
+    <None Update="appicon.ico" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 
   <!--
     Shift-JIS(CP932) は CodePagesEncodingProvider 経由で利用する。

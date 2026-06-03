@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows.Forms;
 
@@ -10,10 +11,19 @@ internal static class Program
     private static int _interval = 2;
     private static bool _once = false;
 
+    /// <summary>トレイ常駐時にログを通知領域/ログ窓へ流すためのフック。</summary>
+    internal static Action<string, ConsoleColor>? LogSink;
+
+    [DllImport("kernel32.dll")]
+    private static extern bool AttachConsole(int dwProcessId);
+    private const int ATTACH_PARENT_PROCESS = -1;
+
     [STAThread]
     private static int Main(string[] args)
     {
-        Console.OutputEncoding = new UTF8Encoding(false);
+        ApplicationConfiguration.Initialize();
+        AttachConsole(ATTACH_PARENT_PROCESS); // コンソールから起動された場合のみ親コンソールへ出力
+        try { Console.OutputEncoding = new UTF8Encoding(false); } catch { /* WinExe: コンソール無し */ }
         Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
 
         ParseArgs(args);
@@ -43,15 +53,16 @@ internal static class Program
         // state: フルパス -> "ticks:size"
         var state = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-        ScanOnce(state);
-        if (_once) { Log("完了 (--once)。", ConsoleColor.Cyan); return 0; }
-
-        Log("監視中... (Ctrl+C で終了)", ConsoleColor.Cyan);
-        while (true)
+        if (_once)
         {
-            Thread.Sleep(_interval * 1000);
             ScanOnce(state);
+            Log("完了 (--once)。", ConsoleColor.Cyan);
+            return 0;
         }
+
+        // 常駐モード: タスクトレイ(通知領域)に常駐して監視を続ける
+        Application.Run(new TrayContext(state, _watchPath, _outPath, _interval));
+        return 0;
     }
 
     private static void ParseArgs(string[] args)
@@ -72,7 +83,7 @@ internal static class Program
         if (string.IsNullOrEmpty(_outPath) && positional.Count > 1) _outPath = positional[1];
     }
 
-    private static void ScanOnce(Dictionary<string, string> state)
+    internal static void ScanOnce(Dictionary<string, string> state)
     {
         string[] files;
         try { files = Directory.GetFiles(_watchPath, "*.trc", SearchOption.TopDirectoryOnly); }
@@ -155,14 +166,20 @@ internal static class Program
     }
 
     private static readonly object _logLock = new();
-    private static void Log(string msg, ConsoleColor color = ConsoleColor.Gray)
+    internal static void Log(string msg, ConsoleColor color = ConsoleColor.Gray)
     {
         lock (_logLock)
         {
-            var prev = Console.ForegroundColor;
-            Console.ForegroundColor = color;
-            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] {msg}");
-            Console.ForegroundColor = prev;
+            string line = $"[{DateTime.Now:HH:mm:ss}] {msg}";
+            try
+            {
+                var prev = Console.ForegroundColor;
+                Console.ForegroundColor = color;
+                Console.WriteLine(line);
+                Console.ForegroundColor = prev;
+            }
+            catch { /* WinExe: コンソール無し */ }
+            LogSink?.Invoke(line, color);
         }
     }
 }
