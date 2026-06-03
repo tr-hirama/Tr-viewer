@@ -1316,9 +1316,11 @@ function updatePanelVisibility() {
 // ファイル読み込み
 // ===========================================================================
 function decodeText(buf) {
-  const u8 = new Uint8Array(buf);
-  try { return new TextDecoder("utf-8", { fatal: false }).decode(u8); }
-  catch (e) { return new TextDecoder("shift_jis", { fatal: false }).decode(u8); }
+  // DXF は Shift_JIS (R12) のことが多い。decodeSjis と同じく、
+  // 厳密 UTF-8 として解釈できなければ Shift_JIS とみなす。
+  // ※ fatal:false の UTF-8 は不正バイトでも例外を投げず � に置換してしまい、
+  //   Shift_JIS への切替が効かず文字化けするため fatal:true で判定する。
+  return decodeSjis(new Uint8Array(buf));
 }
 
 function loadDxf(text, name) {
