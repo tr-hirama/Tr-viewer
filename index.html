@@ -63,6 +63,20 @@
   #levelXlsxBtn:hover { background: #259384; }
   #levelXlsxBtn.hidden { display: none; }
 
+  #bothBtn {
+    font-size: 12px;
+    background: #7a4fa0;
+    color: #fff;
+    border: none;
+    padding: 5px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    white-space: nowrap;
+    font-family: inherit;
+  }
+  #bothBtn:hover { background: #925fbf; }
+  #bothBtn.hidden { display: none; }
+
   #main { display: flex; flex: 1 1 auto; min-height: 0; }
   #stage { position: relative; flex: 2 1 0; min-width: 0; overflow: hidden; }
   #splitter { flex: 0 0 6px; background: #3f3f46; cursor: col-resize; }
@@ -183,8 +197,9 @@
     <label id="fileLabel">ファイルを開く
       <input id="fileInput" type="file" accept=".dxf,.trc" hidden>
     </label>
-    <button id="saveBtn" class="hidden" title="表示中の図面を DXF (R12) で保存">DXF保存</button>
+    <button id="saveBtn" class="hidden" title="表示中の図面を DXF で保存">DXF保存</button>
     <button id="levelXlsxBtn" class="hidden" title="レベル（水準）データを雛形 Excel (.xlsm) に差し込んで出力">レベルExcel</button>
+    <button id="bothBtn" class="hidden" title="DXF とレベル Excel をまとめて出力">DXF+レベル</button>
     <button id="viewToggle" class="hidden" title="図面とデータを切り替え">📋 データ</button>
     <div id="controls" class="hidden">
       <label><input type="checkbox" id="chkLine" checked> 線</label>
@@ -703,6 +718,7 @@ const chkMoji = document.getElementById("chkMoji");
 const chkFrame = document.getElementById("chkFrame");
 const saveBtn = document.getElementById("saveBtn");
 const levelXlsxBtn = document.getElementById("levelXlsxBtn");
+const bothBtn = document.getElementById("bothBtn");
 const viewToggle = document.getElementById("viewToggle");
 
 let mode = null;          // "dxf" | "trc"
@@ -1347,9 +1363,10 @@ function finishLoad(name, summary) {
   dropEl.classList.add("hidden");
   dropEl.classList.remove("empty");
   saveBtn.classList.remove("hidden");
-  // レベルExcel出力は TRC でレベルデータがある場合のみ
-  if (mode === "trc" && trc && trc.levels.length > 0) levelXlsxBtn.classList.remove("hidden");
-  else levelXlsxBtn.classList.add("hidden");
+  // レベルExcel出力・一括出力は TRC でレベルデータがある場合のみ
+  const hasLevel = mode === "trc" && trc && trc.levels.length > 0;
+  levelXlsxBtn.classList.toggle("hidden", !hasLevel);
+  bothBtn.classList.toggle("hidden", !hasLevel);
   viewToggle.classList.remove("hidden");
   mainEl.classList.remove("view-panel"); // 読込時はまず図面を全面表示 (スマホ)
   viewToggle.textContent = "📋 データ";
@@ -2107,6 +2124,15 @@ async function exportLevelExcel() {
 // ===========================================================================
 saveBtn.addEventListener("click", saveDxf);
 levelXlsxBtn.addEventListener("click", exportLevelExcel);
+
+// DXF とレベル Excel をまとめて出力
+async function exportBoth() {
+  if (!hasData) return;
+  await saveDxf();
+  await new Promise(r => setTimeout(r, 300)); // 連続ダウンロードのブロック回避
+  await exportLevelExcel();
+}
+bothBtn.addEventListener("click", exportBoth);
 
 document.getElementById("fileInput").addEventListener("change", (e) => {
   handleFile(e.target.files[0]);
