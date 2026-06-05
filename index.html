@@ -194,10 +194,10 @@
       <h1>DXF / TRC ビューワー</h1>
       <span id="version">v0.9.0</span>
     </div>
-    <button id="bothBtn" class="hidden" title="DXF とレベル Excel をまとめて出力">DXF+レベル</button>
     <label id="fileLabel">ファイルを開く
       <input id="fileInput" type="file" accept=".dxf,.trc" hidden>
     </label>
+    <button id="bothBtn" class="hidden" title="DXF とレベル Excel を開いたフォルダへまとめて出力">DXF+レベル</button>
     <button id="saveBtn" class="hidden" title="表示中の図面を DXF で保存">DXF保存</button>
     <button id="levelXlsxBtn" class="hidden" title="レベル（水準）データを雛形 Excel (.xlsm) に差し込んで出力">レベルExcel</button>
     <button id="viewToggle" class="hidden" title="図面とデータを切り替え">📋 データ</button>
@@ -719,6 +719,7 @@ const chkFrame = document.getElementById("chkFrame");
 const saveBtn = document.getElementById("saveBtn");
 const levelXlsxBtn = document.getElementById("levelXlsxBtn");
 const bothBtn = document.getElementById("bothBtn");
+const fileLabel = document.getElementById("fileLabel");
 const viewToggle = document.getElementById("viewToggle");
 
 let mode = null;          // "dxf" | "trc"
@@ -1900,7 +1901,7 @@ async function saveDxf() {
       text = trcToDxf(trc);                      // 雛形が無い場合は軽量 R12 にフォールバック
     }
   } else { return; }
-  downloadBlob(new Blob([text], { type: "application/dxf" }), base + ".dxf");
+  await saveOutput(new Blob([text], { type: "application/dxf" }), base + ".dxf");
 }
 
 function downloadBlob(blob, filename) {
@@ -1912,6 +1913,43 @@ function downloadBlob(blob, filename) {
   a.click();
   document.body.removeChild(a);
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+// 開いたファイルのハンドル / 出力先フォルダ（File System Access API 用）
+let currentFileHandle = null;
+let outputDirHandle = null;
+
+async function ensureRWPermission(handle) {
+  const opt = { mode: "readwrite" };
+  if ((await handle.queryPermission(opt)) === "granted") return true;
+  return (await handle.requestPermission(opt)) === "granted";
+}
+
+// 保存ダイアログを出さず、開いたファイルと同じフォルダへ書き出す。
+//   File System Access API 対応時のみ。フォルダ許可はセッションで一度だけ。
+//   未対応／キャンセル時は従来のダウンロードにフォールバック。
+async function saveOutput(blob, filename) {
+  if (window.showDirectoryPicker) {
+    try {
+      if (!outputDirHandle) {
+        const opt = { id: "tr-viewer-out", mode: "readwrite" };
+        if (currentFileHandle) opt.startIn = currentFileHandle; // 開いたファイルのフォルダで開く
+        outputDirHandle = await window.showDirectoryPicker(opt);
+      }
+      if (await ensureRWPermission(outputDirHandle)) {
+        const fh = await outputDirHandle.getFileHandle(filename, { create: true });
+        const w = await fh.createWritable();
+        await w.write(blob);
+        await w.close();
+        return true;
+      }
+    } catch (e) {
+      if (e && e.name === "AbortError") { outputDirHandle = null; return false; } // ユーザーがキャンセル
+      console.warn("フォルダ保存に失敗、ダウンロードにフォールバック:", e);
+    }
+  }
+  downloadBlob(blob, filename); // フォールバック
+  return true;
 }
 
 // ===========================================================================
@@ -2114,7 +2152,7 @@ async function exportLevelExcel() {
 
   const base = (currentName || "level").replace(/\.[^.]*$/, "");
   const out = zipBuild(entries);
-  downloadBlob(new Blob([out], {
+  await saveOutput(new Blob([out], {
     type: "application/vnd.ms-excel.sheet.macroEnabled.12"
   }), base + "_Level.xlsm");
 }
@@ -2135,7 +2173,22 @@ async function exportBoth() {
 bothBtn.addEventListener("click", exportBoth);
 
 document.getElementById("fileInput").addEventListener("change", (e) => {
+  currentFileHandle = null; // input 経由はハンドル無し（保存時にフォルダ選択）
   handleFile(e.target.files[0]);
+});
+
+// File System Access API 対応時は showOpenFilePicker でファイルハンドルを取得
+//   （保存時にそのファイルのフォルダを起点にできる）
+fileLabel.addEventListener("click", async (e) => {
+  if (!window.showOpenFilePicker) return; // 未対応は input の既定動作
+  e.preventDefault();
+  try {
+    const [fh] = await window.showOpenFilePicker({
+      types: [{ description: "DXF / TRC", accept: { "application/octet-stream": [".dxf", ".trc"] } }],
+    });
+    currentFileHandle = fh;
+    await handleFile(await fh.getFile());
+  } catch (err) { /* ユーザーがキャンセル */ }
 });
 
 // ドラッグ&ドロップ
