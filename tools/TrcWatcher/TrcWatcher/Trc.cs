@@ -5,9 +5,9 @@ using System.Text;
 namespace TrcWatcher;
 
 // ---- TRC データモデル ----
-public sealed class TrcPoint { public string Name = ""; public double X, Y; public int NotDisp, Sketch, Del; }
+public sealed class TrcPoint { public string Name = ""; public double X, Y; public int NotDisp, Sketch, Del, Yoten; }
 public sealed class TrcLine  { public string Name = "", Layer = "", PnA = "", PnB = ""; public int Del, Sketch, Style = 1; }
-public sealed class TrcCircle{ public string Name = "", Layer = ""; public double X, Y, R; public int Fill, Del, Sketch, Photo; }
+public sealed class TrcCircle{ public string Name = "", Layer = "", PointName = ""; public double X, Y, R; public int Fill, Del, Sketch, Photo; }
 public sealed class TrcMoji  { public string Name = "", Layer = "", Text = ""; public double X, Y, Height, Angle; public int Del, Sketch; }
 public sealed class TrcHedge { public string Name = ""; public double X1, Y1, X2, Y2; public int Del; }
 public sealed class TrcVertex{ public double X, Y; }
@@ -15,6 +15,7 @@ public sealed class TrcPline { public string Name = ""; public int Del, Sketch; 
 public sealed class TrcBlock { public string Name = ""; public List<TrcVertex> Pts = new(); }
 public sealed class TrcInsert{ public string Name = "", Layer = "", Block = ""; public double X, Y, Angle; public int Del; }
 public sealed class TrcLevel { public string Name = "", Bs = "", Fs = "", Remarks = "", Tp = ""; }
+public sealed class TrcComment { public int Sort; public bool Check; public string Text = ""; }
 
 public sealed class TrcData
 {
@@ -27,6 +28,7 @@ public sealed class TrcData
     public Dictionary<string, TrcBlock> Blocks = new();
     public List<TrcInsert> Inserts = new();
     public List<TrcLevel>  Levels  = new();
+    public List<TrcComment> Comments = new();
     public Dictionary<string, TrcPoint> PointMap = new();
 
     public int ShapeCount =>
@@ -49,7 +51,7 @@ public static class TrcReader
         }
     }
 
-    // ZIP 内 TrDATA.trc / 平文 両対応 (Shift-JIS)
+    // ZIP 内 TrDATA.trc / 平文 両対応
     public static string ReadText(string path)
     {
         byte[] bytes = File.ReadAllBytes(path);
@@ -63,9 +65,25 @@ public static class TrcReader
             using var es = entry.Open();
             using var outMs = new MemoryStream();
             es.CopyTo(outMs);
-            return Sjis.GetString(outMs.ToArray());
+            return DecodeSmart(outMs.ToArray());
         }
-        return Sjis.GetString(bytes);
+        return DecodeSmart(bytes);
+    }
+
+    // Tr-viewer(index.html) decodeSjis と同じ判定:
+    //   UTF-8 BOM → UTF-8 / 厳密 UTF-8 として解釈できれば UTF-8 / それ以外は Shift-JIS
+    private static string DecodeSmart(byte[] bytes)
+    {
+        if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF)
+            return Encoding.UTF8.GetString(bytes, 3, bytes.Length - 3);
+        try
+        {
+            return new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true).GetString(bytes);
+        }
+        catch (DecoderFallbackException)
+        {
+            return Sjis.GetString(bytes);
+        }
     }
 
     private static double ToNum(string v)
@@ -146,7 +164,8 @@ public static class TrcReader
                     trc.Points.Add(new TrcPoint
                     {
                         Name = At(f, 0), X = ToNum(At(f, 1)), Y = ToNum(At(f, 2)),
-                        NotDisp = ToInt0(At(f, 3)), Sketch = ToInt0(At(f, 4)), Del = ToInt0(At(f, 5))
+                        NotDisp = ToInt0(At(f, 3)), Sketch = ToInt0(At(f, 4)), Del = ToInt0(At(f, 5)),
+                        Yoten = ToInt0(At(f, 6))
                     });
                     break;
                 case "*Line-Section*":
@@ -163,7 +182,8 @@ public static class TrcReader
                     trc.Circles.Add(new TrcCircle
                     {
                         Name = At(f, 0), Layer = At(f, 1), X = ToNum(At(f, 2)), Y = ToNum(At(f, 3)), R = ToNum(At(f, 4)),
-                        Fill = ToInt0(At(f, 5)), Del = ToInt0(At(f, 6)), Sketch = ToInt0(At(f, 7)), Photo = ToInt0(At(f, 9))
+                        Fill = ToInt0(At(f, 5)), Del = ToInt0(At(f, 6)), Sketch = ToInt0(At(f, 7)),
+                        PointName = At(f, 8), Photo = ToInt0(At(f, 9))
                     });
                     break;
                 case "*Moji-Section*":
@@ -214,6 +234,20 @@ public static class TrcReader
                     {
                         curBlock = new TrcBlock { Name = At(f, 0) };
                         trc.Blocks[At(f, 0)] = curBlock;
+                    }
+                    break;
+                case "*Comment-Section*":
+                    // SortNum(0),Check(1),全文(2),改行入りテキスト(3, |区切り),順序(4)
+                    if (f.Count >= 4)
+                    {
+                        string txt = At(f, 3);
+                        if (txt.Length == 0) txt = At(f, 2);
+                        trc.Comments.Add(new TrcComment
+                        {
+                            Sort = ToInt0(At(f, 0)),
+                            Check = At(f, 1).Contains("true", StringComparison.OrdinalIgnoreCase),
+                            Text = txt
+                        });
                     }
                     break;
             }

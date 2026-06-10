@@ -25,11 +25,12 @@ public static class LevelCalculator
         return s.Length != 0 && double.TryParse(s, NumberStyles.Float, Inv, out _);
     }
 
-    // JS Math.round / VB CInt 相当 (整数 mm 入力前提)
+    // JS Math.round 相当 = floor(x + 0.5)。Tr-viewer(index.html) computeLevels と
+    // 同じ値になるようにする (Math.Round の AwayFromZero は負の .5 で 1mm ずれる)
     private static int RoundInt(string s)
     {
         double.TryParse((s ?? "").Trim(), NumberStyles.Float, Inv, out double d);
-        return (int)Math.Round(d, MidpointRounding.AwayFromZero);
+        return (int)Math.Floor(d + 0.5);
     }
 
     public static List<LevelResult> Compute(IReadOnlyList<TrcLevel> levels)
