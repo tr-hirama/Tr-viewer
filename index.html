@@ -192,7 +192,7 @@
   <header>
     <div id="titleBox">
       <h1>DXF / TRC ビューワー</h1>
-      <span id="version">v0.9.0</span>
+      <span id="version">v0.9.1</span>
     </div>
     <label id="fileLabel">ファイルを開く
       <input id="fileInput" type="file" accept=".dxf,.trc" hidden>
@@ -875,17 +875,32 @@ function drawDxf() {
   // 黒背景・レイヤー色 (ByLayer) で描画
   ctx.lineWidth = 1;
 
+  // LINE は本数が多いため、色ごとに 1 つのパスへまとめて stroke 回数を減らす
+  const lineBatches = new Map(); // color -> [x1,y1,x2,y2, ...]
   for (const e of entities) {
+    if (e.type !== "LINE") continue;
+    const col = dxfEntityColor(e);
+    let segs = lineBatches.get(col);
+    if (!segs) { segs = []; lineBatches.set(col, segs); }
+    segs.push(e.props.x, e.props.y, e.props.x2, e.props.y2);
+  }
+  for (const [col, segs] of lineBatches) {
+    ctx.strokeStyle = col;
+    ctx.beginPath();
+    for (let k = 0; k < segs.length; k += 4) {
+      ctx.moveTo(tx(segs[k]), ty(segs[k + 1]));
+      ctx.lineTo(tx(segs[k + 2]), ty(segs[k + 3]));
+    }
+    ctx.stroke();
+  }
+
+  for (const e of entities) {
+    if (e.type === "LINE") continue; // 上でバッチ描画済み
     const col = dxfEntityColor(e);
     ctx.strokeStyle = col;
     ctx.fillStyle = col;
     ctx.beginPath();
     switch (e.type) {
-      case "LINE":
-        ctx.moveTo(tx(e.props.x), ty(e.props.y));
-        ctx.lineTo(tx(e.props.x2), ty(e.props.y2));
-        ctx.stroke();
-        break;
       case "CIRCLE":
         ctx.arc(tx(e.props.x), ty(e.props.y), e.props.r * view.scale, 0, Math.PI * 2);
         ctx.stroke();
@@ -988,38 +1003,52 @@ function trcMojiColor(m) {
 
 function drawTrc() {
   // 点と点名 (cad-trcad: 黒の × ±3px、点名は黒で View.X+2, View.Y-12)
+  //   × 印は全点同一スタイルのため 1 つのパスにまとめて 1 回で stroke する
   ctx.font = "12px 'MS UI Gothic','MS Gothic',monospace";
   const PT = 3;
+  const labels = [];
+  ctx.strokeStyle = COL.black;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
   for (const p of trc.points) {
     if (p.del || p.notDisp) continue;
     if (p.name && p.name.charAt(0) === L_SKETCH) continue; // スケッチ記号の点は非表示
     const sx = tx(p.x), sy = ty(p.y);
-    ctx.strokeStyle = COL.black;
-    ctx.lineWidth = 1;
-    ctx.beginPath();
     ctx.moveTo(sx - PT, sy - PT); ctx.lineTo(sx + PT, sy + PT);
     ctx.moveTo(sx - PT, sy + PT); ctx.lineTo(sx + PT, sy - PT);
-    ctx.stroke();
-    if (chkLabel.checked && p.name) {
-      ctx.fillStyle = COL.black;
-      ctx.textAlign = "left"; ctx.textBaseline = "top";
-      ctx.fillText(p.name, sx + 2, sy - 12);
-    }
+    if (chkLabel.checked && p.name) labels.push(p.name, sx + 2, sy - 12);
+  }
+  ctx.stroke();
+  if (labels.length) {
+    ctx.fillStyle = COL.black;
+    ctx.textAlign = "left"; ctx.textBaseline = "top";
+    for (let k = 0; k < labels.length; k += 3) ctx.fillText(labels[k], labels[k + 1], labels[k + 2]);
   }
 
   // 線 (点名 pnA/pnB を参照、レイヤー・スタイル別の色／破線)
+  //   ペン (色/太さ/破線) ごとにセグメントをまとめ、パス単位で stroke する
+  //   (破線パターンはサブパスごとに先頭から適用されるため見た目は線単位描画と同一)
   if (chkLine.checked) {
+    const penGroups = new Map(); // key -> { pen, segs: [ax,ay,bx,by, ...] }
     for (const ln of trc.lines) {
       if (ln.del) continue;
       const a = trc.pointMap.get(ln.pnA), b = trc.pointMap.get(ln.pnB);
       if (!a || !b) continue;
       const pen = trcLinePen(ln);
+      const key = pen.color + "/" + pen.width + "/" + pen.dash.join(",");
+      let g = penGroups.get(key);
+      if (!g) { g = { pen, segs: [] }; penGroups.set(key, g); }
+      g.segs.push(a.x, a.y, b.x, b.y);
+    }
+    for (const { pen, segs } of penGroups.values()) {
       ctx.strokeStyle = pen.color;
       ctx.lineWidth = pen.width;
       ctx.setLineDash(pen.dash);
       ctx.beginPath();
-      ctx.moveTo(tx(a.x), ty(a.y));
-      ctx.lineTo(tx(b.x), ty(b.y));
+      for (let k = 0; k < segs.length; k += 4) {
+        ctx.moveTo(tx(segs[k]), ty(segs[k + 1]));
+        ctx.lineTo(tx(segs[k + 2]), ty(segs[k + 3]));
+      }
       ctx.stroke();
     }
     ctx.setLineDash([]);
@@ -1404,6 +1433,7 @@ function loadDxf(text, name) {
   mode = "dxf";
   entities = parseDxf(text);
   trc = null;
+  trcRawText = ""; // 前回 TRC の生テキストを解放
   controls.classList.add("hidden");
   renderPanel();
   finishLoad(name, `${entities.length} エンティティ`);
@@ -1646,12 +1676,24 @@ function trcToDxf(trc) {
     }
   }
 
-  // インサート（ブロック参照）
+  // インサート（ブロック参照）— 参照するブロックは BLOCKS セクションにも定義する
+  //   (定義が無い INSERT は CAD で開けない / 無視されるため)
+  const seenInsBlk = new Set();
   for (const ins of trc.inserts) {
     if (ins.del || ins.sketch) continue;
     const blk = trc.blocks.get(ins.block);
     if (!blk || blk.pts.length === 0) continue;
     const bname = ins.block === "Uekomi" ? "KABU1" : ins.block;
+    if (!seenInsBlk.has(bname)) {
+      seenInsBlk.add(bname);
+      const lines = [];
+      for (let i = 1; i < blk.pts.length; i++) {
+        // ブロック点はインサート位置からの相対座標 (×1000 のみ、min オフセット不要)
+        lines.push([(blk.pts[i - 1].x * DXF_SCALE).toFixed(3), (blk.pts[i - 1].y * DXF_SCALE).toFixed(3),
+                    (blk.pts[i].x * DXF_SCALE).toFixed(3), (blk.pts[i].y * DXF_SCALE).toFixed(3)]);
+      }
+      blocks.push({ name: bname, lines });
+    }
     ent.push("0","INSERT","8",dxfInsertLayer(ins.layer),"2",bname,
       "10",X(ins.x),"20",Y(ins.y),"30","0.0");
     if (ins.angle) ent.push("50",String(-ins.angle));
@@ -1701,6 +1743,15 @@ function trcToDxf(trc) {
   out.push(...ent);
   out.push("0","ENDSEC","0","EOF");
   return out.join("\r\n") + "\r\n";
+}
+
+// R12 形式の POLYLINE (VERTEX 列 + SEQEND) を body へ追加
+function pushPolyline(body, h, pts, layer, closed) {
+  body.push("0","POLYLINE","8",layer,"5",h(),"66","1","70",closed ? "1" : "0",
+    "10","0.0","20","0.0","30","0.0");
+  for (const v of pts)
+    body.push("0","VERTEX","8",layer,"5",h(),"10",v.x,"20",v.y,"30","0.0");
+  body.push("0","SEQEND","8",layer,"5",h());
 }
 
 function entitiesToDxf(entities) {
@@ -2271,7 +2322,26 @@ const stage = document.getElementById("stage");
 );
 stage.addEventListener("drop", (e) => {
   const f = e.dataTransfer.files[0];
-  if (f) handleFile(f);
+  if (f) {
+    currentFileHandle = null; // D&D 経由はハンドル無し（保存時にフォルダ選択）
+    handleFile(f);
+  }
+});
+
+// ステージ外 (ヘッダー / データパネル等) へのドロップでブラウザがファイルを
+// 開いてしまい、アプリごと消える事故を防ぐ。ファイルならそのまま読み込む。
+["dragenter", "dragover"].forEach(ev =>
+  window.addEventListener(ev, (e) => {
+    if (e.dataTransfer && e.dataTransfer.types && Array.from(e.dataTransfer.types).includes("Files"))
+      e.preventDefault();
+  })
+);
+window.addEventListener("drop", (e) => {
+  if (stage.contains(e.target)) return; // ステージは専用ハンドラが処理
+  if (!e.dataTransfer || !e.dataTransfer.files || e.dataTransfer.files.length === 0) return;
+  e.preventDefault();
+  currentFileHandle = null;
+  handleFile(e.dataTransfer.files[0]);
 });
 
 // ズーム / パン / 座標表示
