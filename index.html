@@ -1714,7 +1714,7 @@ function trcToDxf(trc) {
   }
 
   // コメント → MTEXT （Check=True を SortNum 順。位置は近似）
-  const comments = trc.comments.filter(c => c.check).sort((a, b) => a.sort - b.sort);
+  const comments = trc.comments.filter(c => c.check && String(c.text ?? "").trim() !== "").sort((a, b) => a.sort - b.sort);
   if (comments.length) {
     let maxX = -Infinity, maxY = -Infinity;
     for (const p of trc.points) if (!p.notDisp) { if (p.x > maxX) maxX = p.x; if (p.y > maxY) maxY = p.y; }
@@ -1977,7 +1977,7 @@ async function trcToDxfFull(trc) {
   }
 
   // コメント → MTEXT
-  const comments = trc.comments.filter(c => c.check).sort((a, b) => a.sort - b.sort);
+  const comments = trc.comments.filter(c => c.check && String(c.text ?? "").trim() !== "").sort((a, b) => a.sort - b.sort);
   if (comments.length) {
     let mxX = -Infinity, mxY = -Infinity;
     for (const p of trc.points) if (!p.notDisp) { if (p.x > mxX) mxX = p.x; if (p.y > mxY) mxY = p.y; }
